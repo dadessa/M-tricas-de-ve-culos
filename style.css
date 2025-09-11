@@ -1,0 +1,179 @@
+/* =========================================================
+   DASH THEME (Light & Dark, alto contraste)
+   ========================================================= */
+
+/* ---------- BASE / RESET ---------- */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: Inter, system-ui, Segoe UI, Roboto, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* O app aplica "light" ou "dark" no #root. Variáveis por tema. */
+#root.dark {
+  --bg: #112a54;          /* navy + claro p/ destacar os cards */
+  --panel: #0f172a;
+  --card: #0c1424;
+  --text: #e6eef8;        /* texto principal */
+  --muted: #a3b1c6;       /* rótulos/placeholder */
+  --primary: #6366f1;
+  --success: #22c55e;
+  --danger: #ef4444;
+  --border: 1px solid rgba(255,255,255,.10);
+  --ring: 0 0 0 2px rgba(99,102,241,.36);
+  --shadow: 0 14px 32px rgba(2,6,23,.45);
+  --grid: #243044;
+}
+#root.light {
+  --bg: #EAF2FF;          /* azul clarinho de fundo */
+  --panel: #ffffff;
+  --card: #ffffff;
+  --text: #0b0f19;        /* texto principal BEM escuro */
+  --muted: #334155;       /* rótulos/placeholder com contraste */
+  --primary: #4f46e5;
+  --success: #16a34a;
+  --danger: #ef4444;
+  --border: 1px solid #cbd5e1;
+  --ring: 0 0 0 2px rgba(79,70,229,.18);
+  --shadow: 0 12px 22px rgba(16,24,40,.10);
+  --grid: #e7eaf3;
+}
+
+#root.dark, #root.light { background: var(--bg) !important; color: var(--text); }
+
+/* ---------- LAYOUT ---------- */
+.container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+.navbar {
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--panel); border: var(--border);
+  border-radius: 16px; padding: 14px 16px; box-shadow: var(--shadow);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand h1 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: .2px; }
+.badge { font-size: 12px; color: var(--muted); }
+.actions { display: flex; align-items: center; gap: 10px; }
+
+.panel { background: var(--panel); border: var(--border); border-radius: 16px; padding: 14px; margin-top: 14px; box-shadow: var(--shadow); }
+.card  { background: var(--card);  border: var(--border); border-radius: 16px; padding: 16px; box-shadow: var(--shadow); }
+
+.filters { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 12px; }
+.label { font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 800; }
+
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }
+.kpi-title { margin: 0 0 6px; color: var(--muted); font-weight: 800; }
+.kpi-value { margin: 0; font-size: 34px; font-weight: 900; letter-spacing: .3px; color: var(--text); }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+.grid-1 { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 14px; }
+
+.btn {
+  border: 0; padding: 10px 14px; border-radius: 10px; font-weight: 700; cursor: pointer;
+  background: var(--primary); color: #fff; box-shadow: var(--ring); transition: transform .05s ease;
+}
+.btn:active { transform: translateY(1px); }
+.btn.ghost { background: transparent; color: var(--text); border: var(--border); box-shadow: none; }
+
+/* ---------- FORM ELEMENTS (Dash Dropdown / react-select) ---------- */
+/* Base */
+.Select-control {
+  background: var(--panel) !important;
+  color: var(--text) !important;
+  border: var(--border) !important;
+  border-radius: 10px !important;
+  height: 38px;
+}
+.Select-placeholder { color: var(--muted) !important; opacity: .98; }
+.Select-value-label { color: var(--text) !important; font-weight: 700 !important; }
+.Select-input > input { color: var(--text) !important; }
+.Select-arrow, .Select-clear { color: var(--muted) !important; fill: var(--muted) !important; }
+
+/* Menu */
+.Select-menu-outer {
+  background: var(--card) !important;
+  border: var(--border) !important;
+  box-shadow: 0 14px 28px rgba(0,0,0,.35) !important;
+  z-index: 9999 !important;
+}
+.Select-option { color: var(--text) !important; background: transparent !important; }
+.Select-option.is-focused { background: rgba(99,102,241,.15) !important; }
+.Select-option.is-selected { background: rgba(155, 156, 227, 0.3) !important; color: #fff !important; font-weight: 800 !important; }
+
+/* Overrides fortes p/ tema CLARO (garante contraste) */
+#root.light .Select, #root.light .Select * { color: #0b0f19 !important; text-shadow: none !important; }
+#root.light .Select-control { background: #fff !important; border: 1px solid #cbd5e1 !important; }
+#root.light .Select-placeholder { color: #475569 !important; }
+#root.light .Select-value-label { color: #0b0f19 !important; }
+#root.light .Select-input > input { color: #0b0f19 !important; }
+#root.light .Select-arrow, #root.light .Select-clear { color: #64748b !important; fill: #64748b !important; }
+#root.light .Select-menu-outer { background: #fff !important; border: 1px solid #cbd5e1 !important; box-shadow: 0 10px 26px rgba(16,24,40,.12) !important; }
+#root.light .Select-option { color: #0b0f19 !important; }
+#root.light .Select-option.is-focused { background: #eef2ff !important; }
+#root.light .Select-option.is-selected { background: #e0e7ff !important; color: #0b0f19 !important; }
+
+/* Chips (multi=true) */
+.Select-value { background: rgba(99,102,241,.18) !important; border: 0 !important; }
+.Select-value-icon, .Select-value-label { color: #e6e7ff !important; }
+#root.light .Select-value { background: #e0e7ff !important; }
+#root.light .Select-value-label { color: #0b0f19 !important; }
+
+/* Input de texto (busca por nome do site) */
+input[type="text"] {
+  background: var(--panel) !important;
+  color: var(--text) !important;
+  border: var(--border) !important;
+  border-radius: 10px !important;
+  height: 38px; padding: 0 10px;
+}
+input[type="text"]::placeholder { color: var(--muted) !important; }
+#root.light input[type="text"] { background: #fff !important; border: 1px solid #cbd5e1 !important; color: #0b0f19 !important; }
+#root.light input[type="text"]::placeholder { color: #475569 !important; }
+
+/* ---------- PLOTLY (legibilidade reforçada) ---------- */
+.js-plotly-plot .plotly .modebar { display: none; } /* oculta toolbar */
+
+#root.dark  .js-plotly-plot .gtitle,
+#root.dark  .js-plotly-plot .legend text,
+#root.dark  .js-plotly-plot .xtick text,
+#root.dark  .js-plotly-plot .ytick text,
+#root.dark  .js-plotly-plot .infolayer text,
+#root.dark  .js-plotly-plot .hovertext text,
+#root.dark  .js-plotly-plot .bar text,
+#root.dark  .js-plotly-plot .slice text,
+#root.dark  .js-plotly-plot .treemaptext,
+#root.dark  .js-plotly-plot .sunbursttext { fill: #e6eef8 !important; }
+
+#root.light .js-plotly-plot .gtitle,
+#root.light .js-plotly-plot .legend text,
+#root.light .js-plotly-plot .xtick text,
+#root.light .js-plotly-plot .ytick text,
+#root.light .js-plotly-plot .infolayer text,
+#root.light .js-plotly-plot .hovertext text,
+#root.light .js-plotly-plot .bar text,
+#root.light .js-plotly-plot .slice text,
+#root.light .js-plotly-plot .treemaptext,
+#root.light .js-plotly-plot .sunbursttext { fill: #0b0f19 !important; }
+
+/* ---------- DATATABLE ---------- */
+.dash-table-container .row { margin: 0; }
+.dash-table-container .dash-spreadsheet-container { border: 0; }
+.dash-table-container .dash-spreadsheet-inner th,
+.dash-table-container .dash-spreadsheet-inner td {
+  background: transparent !important;
+  color: var(--text) !important;
+  border-color: rgba(255,255,255,.10) !important;
+}
+#root.light .dash-table-container .dash-spreadsheet-inner th,
+#root.light .dash-table-container .dash-spreadsheet-inner td {
+  color: #0b0f19 !important;
+  border-color: #4c6f9b !important;
+}
+
+/* ---------- RESPONSIVO ---------- */
+@media (max-width: 1100px) {
+  .filters { grid-template-columns: 1fr 1fr; }
+  .kpis    { grid-template-columns: 1fr 1fr; }
+  .grid-2  { grid-template-columns: 1fr; }
+}
