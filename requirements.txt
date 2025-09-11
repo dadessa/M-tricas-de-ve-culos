@@ -1,6 +1,9 @@
+dash==2.17.1
 pandas
-numpy
-plotly
-dash
-flask
+plotly==5.22.0
+requests
+gunicorn
+kaleido
+reportlab
+xlsxwriter
 openpyxl

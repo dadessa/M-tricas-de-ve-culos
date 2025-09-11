@@ -1,37 +1,38 @@
 # -*- coding: utf-8 -*-
 """
-Observatório – Métricas de Veículos (v2.1 – Google Sheets)
-- Leitura direta do Google Sheets via CSV export (sheet público com link)
-- Filtros (cidade/status/categoria/motivo) reativos + busca por nome
-- KPIs, gráficos e lista (sem paginação)
-- Botão "Atualizar dados" relê a planilha (Sheets) e atualiza tudo
-- Auto-reload a cada 5 min
-- Exportar Excel (formatado) e PDF (gráficos + lista completa)
+Métricas de Veículos (v2.2 – Google Sheets com cache-buster)
+- Lê direto do Google Sheets (aba gid=1225239898)
+- Força atualização (cache-buster) para não usar CSV em cache
+- Botão "Atualizar dados" e auto-reload a cada 5 min
+- Filtros reativos (cidade/status/categoria/motivo) + busca por nome
+- KPIs, gráficos e lista sem paginação
+- Exporta Excel (formatado) e PDF (gráficos + lista)
 """
 
 import os
 import io
+import time
 import unicodedata
 from datetime import datetime
 
+import requests
 import pandas as pd
 import plotly.express as px
 from dash import Dash, dcc, html, dash_table, Input, Output, State, no_update
 from dash.dcc import send_bytes
 
-# ========= CONFIGURAÇÃO DA FONTE DE DADOS =========
-# ID do Google Sheet (da sua URL compartilhada)
+# ========= CONFIG DA PLANILHA =========
 GOOGLE_SHEET_ID = "17TnGB6NpsziDec4fPH-d0TCQwk2LN0BAv6yjmIpyZnI"
-# GID da guia/aba que você quer ler (0 é a primeira aba)
-SHEET_GID = 0
-
-# Opcional: planilha local de fallback (se o download do Sheets falhar)
-EXCEL_FALLBACK = "Recadastramento (respostas).xlsx"
-
+SHEET_GID = 1225239898        # <- sua aba específica
+EXCEL_FALLBACK = "Recadastramento (respostas).xlsx"  # opcional
 
 def gsheet_csv_url(sheet_id: str, gid: int = 0) -> str:
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-
+    # cache-buster via timestamp para evitar cache de proxies
+    ts = int(time.time())
+    return (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}/export"
+        f"?format=csv&gid={gid}&_cb={ts}"
+    )
 
 # ========= HELPERS =========
 def _normalize(colname: str) -> str:
@@ -40,22 +41,19 @@ def _normalize(colname: str) -> str:
     s = s.lower().replace(" ", "_")
     return s
 
-
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
     s = s.str.replace(r"[^0-9,.-]", "", regex=True)
-    s = s.str.replace(",", ".", regex=False)   # <- correção: str.replace (não str_replace)
+    s = s.str.replace(",", ".", regex=False)  # <- correto
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
-
 
 def _pick_motivo_column(cols: list[str]) -> str | None:
     preferidos = [
-        "motivo", "motivo_da_reprovacao", "motivo_reprovacao",
-        "motivo_do_status", "motivo_reprovado", "motivo_do_indeferimento",
+        "motivo","motivo_da_reprovacao","motivo_reprovacao",
+        "motivo_do_status","motivo_reprovado","motivo_do_indeferimento",
     ]
     for c in preferidos:
-        if c in cols:
-            return c
+        if c in cols: return c
     candidatos = [c for c in cols if "motivo" in c]
     if candidatos:
         reforcados = [c for c in candidatos if ("reprov" in c or "indefer" in c)]
@@ -63,91 +61,77 @@ def _pick_motivo_column(cols: list[str]) -> str | None:
     outras = [c for c in cols if any(k in c for k in ["reprov","indefer","justific","observa","coment"])]
     return outras[0] if outras else None
 
-
 def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [_normalize(c) for c in df.columns]
-
-    # Alinha nomes usados no app
     df = df.rename(columns={
-        "nome_do_veiculo.": "nome_fantasia",
-        "nome_empresarial_da_empresa_responsavel.": "razao_social",
-        "endereco_no_site": "endereco_site",
-        "url_ativa_do_veiculo.": "url",
-        "total_de_visualizacoes_junho": "visualizacoes_junho",
-        "total_de_vizualizacoes_junho": "visualizacoes_junho",
-        "total_de_visualizacoes_julho": "visualizacoes_julho",
-        "total_de_vizualizacoes_julho": "visualizacoes_julho",
-        "total_de_visualizacoes_agosto": "visualizacoes_agosto",
-        "total_de_vizualizacoes_agosto": "visualizacoes_agosto",
+        "nome_do_veiculo.":"nome_fantasia",
+        "nome_empresarial_da_empresa_responsavel.":"razao_social",
+        "endereco_no_site":"endereco_site",
+        "url_ativa_do_veiculo.":"url",
+        "total_de_visualizacoes_junho":"visualizacoes_junho",
+        "total_de_vizualizacoes_junho":"visualizacoes_junho",
+        "total_de_visualizacoes_julho":"visualizacoes_julho",
+        "total_de_vizualizacoes_julho":"visualizacoes_julho",
+        "total_de_visualizacoes_agosto":"visualizacoes_agosto",
+        "total_de_vizualizacoes_agosto":"visualizacoes_agosto",
     })
-
-    # Numéricos
-    for c in ["visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto"]:
+    for c in ["visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto"]:
         if c not in df.columns:
             df[c] = 0
         df[c] = clean_numeric(df[c])
+    df["total_visualizacoes"] = df[["visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto"]].sum(axis=1)
 
-    df["total_visualizacoes"] = df[
-        ["visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto"]
-    ].sum(axis=1)
-
-    # Categóricas básicas
-    for c in ["cidade", "categoria", "status"]:
-        if c in df.columns:
-            df[c] = df[c].astype(str).str.strip()
-        else:
-            df[c] = "Não informado"
-
+    for c in ["cidade","categoria","status"]:
+        if c in df.columns: df[c] = df[c].astype(str).str.strip()
+        else: df[c] = "Não informado"
     if "status" in df.columns:
         df["status"] = df["status"].astype(str).str.upper()
 
-    if "nome_fantasia" not in df.columns:
-        df["nome_fantasia"] = ""
+    if "nome_fantasia" not in df.columns: df["nome_fantasia"] = ""
     df["nome_do_veiculo"] = df["nome_fantasia"].astype(str)
+    if "url" not in df.columns: df["url"] = ""
 
-    if "url" not in df.columns:
-        df["url"] = ""
-
-    # Motivo (robusto)
+    # Motivo
     motivo_col = _pick_motivo_column(list(df.columns))
     df["motivo"] = df[motivo_col].astype(str).fillna("").str.strip() if (motivo_col and motivo_col in df.columns) else ""
-
     return df
-
 
 def load_data() -> pd.DataFrame:
     """
-    Tenta ler do Google Sheets (CSV). Se falhar (privacidade/desconexão),
-    tenta a planilha local EXCEL_FALLBACK.
+    Tenta ler do Google Sheets (CSV) com cache-buster e headers anti-cache.
+    Se falhar, tenta fallback local (se existir).
     """
+    url = gsheet_csv_url(GOOGLE_SHEET_ID, SHEET_GID)
     try:
-        url = gsheet_csv_url(GOOGLE_SHEET_ID, SHEET_GID)
-        base = pd.read_csv(url)
+        resp = requests.get(
+            url,
+            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        # Lê CSV a partir do conteúdo baixado (evita problemas de encoding)
+        csv_buf = io.StringIO(resp.content.decode("utf-8", errors="ignore"))
+        base = pd.read_csv(csv_buf)
         return _prepare_df(base)
-    except Exception as e:
+    except Exception as e_net:
         # fallback local
         try:
             base = pd.read_excel(EXCEL_FALLBACK)
             return _prepare_df(base)
-        except Exception as e2:
-            raise RuntimeError(f"Falha ao ler do Sheets ({e}) e fallback Excel ({e2}).")
-
+        except Exception as e_local:
+            raise RuntimeError(f"Falha ao ler do Sheets ({e_net}) e do Excel local ({e_local}).")
 
 # ========= TEMA / CORES =========
 THEME_COLORS = {
-    "light": {
-        "font": "#0F172A", "muted": "#64748B", "grid": "#E9EDF5",
-        "paper": "rgba(0,0,0,0)", "plot": "rgba(0,0,0,0)",
-        "colorway": ["#3B82F6","#22C55E","#F59E0B","#EF4444","#06B6D4","#A78BFA"],
-        "template": "plotly_white",
-    },
-    "dark": {
-        "font": "#E6ECFF", "muted": "#93A3BE", "grid": "#22304A",
-        "paper": "rgba(0,0,0,0)", "plot": "rgba(0,0,0,0)",
-        "colorway": ["#60A5FA","#34D399","#FBBF24","#F87171","#22D3EE","#CABFFD"],
-        "template": "plotly_dark",
-    },
+    "light": {"font":"#0F172A","muted":"#64748B","grid":"#E9EDF5",
+              "paper":"rgba(0,0,0,0)","plot":"rgba(0,0,0,0)",
+              "colorway":["#3B82F6","#22C55E","#F59E0B","#EF4444","#06B6D4","#A78BFA"],
+              "template":"plotly_white"},
+    "dark":  {"font":"#E6ECFF","muted":"#93A3BE","grid":"#22304A",
+              "paper":"rgba(0,0,0,0)","plot":"rgba(0,0,0,0)",
+              "colorway":["#60A5FA","#34D399","#FBBF24","#F87171","#22D3EE","#CABFFD"],
+              "template":"plotly_dark"},
 }
 EXTENDED_SEQ = {
     "light":[ "#3B82F6","#22C55E","#F59E0B","#EF4444","#06B6D4","#A78BFA",
@@ -184,7 +168,6 @@ def style_fig(fig, theme="light"):
                       opacity=0.95 if theme=="dark" else 1.0)
     return fig
 
-
 # ========= BASE INICIAL =========
 try:
     DF_BASE = load_data()
@@ -193,7 +176,6 @@ except Exception:
         "nome_do_veiculo","cidade","status","motivo","categoria",
         "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto","total_visualizacoes"
     ])
-
 
 # ========= APP =========
 app = Dash(__name__)
@@ -207,7 +189,6 @@ def kpi_card(kpi_id: str, label: str):
 
 app.layout = html.Div(className="light", id="root", children=[
     dcc.Store(id="store-base", data=DF_BASE.to_json(orient="split")),
-    dcc.Store(id="store-order", data="desc"),
     dcc.Interval(id="auto-reload", interval=5*60*1000, n_intervals=0),  # 5min
 
     html.Div(className="container", children=[
@@ -215,8 +196,8 @@ app.layout = html.Div(className="light", id="root", children=[
         html.Div(className="navbar", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize":"20px"}),
-                html.H1("Observatório • Métricas de Veículos"),
-                html.Span("v2.1 (Google Sheets)", className="badge"),
+                html.H1("Métricas de Veículos"),
+                html.Span("v2.2 (Sheets)", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -234,7 +215,7 @@ app.layout = html.Div(className="light", id="root", children=[
             ]),
         ]),
 
-        # Filtros (opções reativas ao conteúdo)
+        # Filtros
         html.Div(className="panel", children=[
             html.Div(className="filters", children=[
                 html.Div(children=[
@@ -286,7 +267,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="card", children=[dcc.Graph(id="g_top_sites", config={"displayModeBar":False})]),
         ]),
 
-        # Lista (sem paginação)
+        # Lista
         html.Div(className="panel", children=[
             html.Div("Dados detalhados", className="label"),
             html.Div(className="card", children=[
@@ -321,7 +302,6 @@ app.layout = html.Div(className="light", id="root", children=[
     ]),
 ])
 
-
 # ========= LÓGICA =========
 def _filtrar(base: pd.DataFrame, cidade, status, categoria, motivo, termo) -> pd.DataFrame:
     dff = base.copy()
@@ -335,17 +315,8 @@ def _filtrar(base: pd.DataFrame, cidade, status, categoria, motivo, termo) -> pd
         dff = dff[dff[alvo].astype(str).str.contains(str(termo), case=False, na=False)]
     return dff
 
-
-def get_sequence(theme: str, n: int):
-    seq = EXTENDED_SEQ.get(theme, EXTENDED_SEQ["light"])
-    if n <= len(seq): return seq[:n]
-    times = (n // len(seq)) + 1
-    return (seq * times)[:n]
-
-
 def _build_figures(dff: pd.DataFrame, order: str, theme: str):
     ascending = (order == "asc")
-
     # Status
     if "status" in dff and not dff.empty:
         g1 = dff["status"].astype(str).str.upper().value_counts().reset_index()
@@ -413,9 +384,8 @@ def _build_figures(dff: pd.DataFrame, order: str, theme: str):
 
     return fig_status, fig_cidades, fig_meses, fig_sites
 
-
 # ========= CALLBACKS =========
-# Atualizar dataset (Sheets) ao clicar no botão ou pelo timer
+# Atualiza dataset (Sheets) no clique e no timer
 @app.callback(
     Output("store-base", "data"),
     Output("export-msg", "children", allow_duplicate=True),
@@ -431,11 +401,11 @@ def do_reload(_n, _t):
     except Exception as e:
         return no_update, f"Falha ao atualizar dados: {e}"
 
-# Trocar tema
+# Troca tema
 @app.callback(Output("root","className"), Input("theme-toggle","value"))
 def set_theme(theme): return "light" if theme=="light" else "dark"
 
-# Atualizar filtros, KPIs, gráficos e lista sempre que os dados/filtros mudarem
+# Atualiza filtros/visuais/lista quando dados ou filtros mudarem
 @app.callback(
     Output("f_cidade", "options"),
     Output("f_status", "options"),
@@ -597,6 +567,7 @@ def build_pdf_bytes(dff: pd.DataFrame, figs: list, theme: str) -> bytes:
                 r.append(Paragraph(str(v), cell))
         data.append(r)
 
+    from reportlab.platypus import TableStyle
     tbl = LongTable(data, repeatRows=1, colWidths=col_widths)
     ts = TableStyle([
         ("BACKGROUND",(0,0),(-1,0), colors.HexColor("#1F2937")),
@@ -617,6 +588,7 @@ def build_pdf_bytes(dff: pd.DataFrame, figs: list, theme: str) -> bytes:
             ts.add("ALIGN", (idx,1), (idx,-1), "RIGHT")
     tbl.setStyle(ts)
 
+    from reportlab.platypus import PageBreak, Spacer
     story.append(PageBreak())
     story.append(Paragraph("Dados detalhados", style_h2))
     story.append(Spacer(1, 6))
