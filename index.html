@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard de Veículos de Comunicação</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { color: #2c3e50; text-align: center; margin-bottom: 30px; }
+        .filters { background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .filter-group { display: inline-block; margin-right: 20px; margin-bottom: 10px; }
+        .filter-group label { display: block; font-weight: bold; margin-bottom: 5px; }
+        .filter-group select { padding: 8px; border: 1px solid #ddd; border-radius: 4px; min-width: 150px; }
+        .kpis { display: flex; gap: 20px; margin-bottom: 30px; flex-wrap: wrap; }
+        .kpi { background: white; padding: 20px; border-radius: 10px; text-align: center; flex: 1; min-width: 200px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .kpi h3 { margin: 0; font-size: 2em; }
+        .kpi p { margin: 5px 0 0 0; color: #666; }
+        .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .chart { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .table-container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; min-width: 1200px; }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; font-size: 14px; }
+        th { background-color: #3498db; color: white; position: sticky; top: 0; z-index: 10; }
+        td { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        td:first-child { max-width: 200px; font-weight: bold; } /* Nome do veículo */
+        td:nth-child(7) { max-width: 120px; } /* Endereço */
+        td:nth-child(8), td:nth-child(9), td:nth-child(10) { text-align: right; } /* Views */
+        tr.reprovado { background-color: #ffebee; }
+        tr.reprovado td { color: #c62828; font-weight: bold; }
+        tr.reprovado:hover { background-color: #ffcdd2; }
+        tr:hover { background-color: #f8f9fa; }
+        .loading { text-align: center; padding: 50px; }
+        .pdf-button { 
+            background-color: #e74c3c; 
+            color: white; 
+            padding: 12px 24px; 
+            border: none; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            font-size: 16px; 
+            margin: 10px 0; 
+            float: right;
+        }
+        .pdf-button:hover { background-color: #c0392b; }
+        .refresh-button { 
+            background-color: #27ae60; 
+            color: white; 
+            padding: 12px 24px; 
+            border: none; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            font-size: 16px; 
+            margin: 10px 5px; 
+        }
+        .refresh-button:hover { background-color: #229954; }
+        .refresh-button:disabled { background-color: #95a5a6; cursor: not-allowed; }
+        .header-buttons { display: flex; gap: 10px; }
+        .header-controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .data-source-indicator {
+            background: #ecf0f1;
+            padding: 10px 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-size: 14px;
+            border-left: 4px solid #3498db;
+        }
+        .data-source-indicator.google-sheets { border-left-color: #27ae60; }
+        .data-source-indicator.local-file { border-left-color: #f39c12; }
+        @media print {
+            .pdf-button { display: none; }
+            .filters { page-break-after: always; }
+            .charts { page-break-inside: avoid; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header-controls">
+            <h1>Dashboard de Análise de Veículos de Comunicação</h1>
+            <div class="header-buttons">
+                <button class="refresh-button" onclick="refreshData()">🔄 Atualizar Dados</button>
+                <button class="pdf-button" onclick="generatePDF()">📄 Gerar PDF</button>
+            </div>
+        </div>
+        
+        <div class="data-source-indicator" id="data-source">
+            <span id="data-source-text">📊 Fonte: Carregando...</span>
+        </div>
+        
+        <div class="filters">
+            <div class="filter-group">
+                <label for="cidade-filter">Filtrar por Cidade:</label>
+                <select id="cidade-filter">
+                    <option value="all">Todas</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="status-filter">Filtrar por Status:</label>
+                <select id="status-filter">
+                    <option value="all">Todos</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="categoria-filter">Filtrar por Categoria:</label>
+                <select id="categoria-filter">
+                    <option value="all">Todas</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="search-input">Buscar por Nome do Site:</label>
+                <input type="text" id="search-input" placeholder="Digite o nome do site..." style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; min-width: 200px;">
+            </div>
+        </div>
+        
+        <div class="kpis" id="kpis">
+            <div class="loading">Carregando dados...</div>
+        </div>
+        
+        <div class="charts">
+            <div class="chart">
+                <h3>Distribuição por Status</h3>
+                <canvas id="status-chart" width="400" height="300"></canvas>
+            </div>
+            <div class="chart">
+                <h3>Top 10 Cidades</h3>
+                <canvas id="cidade-chart" width="400" height="300"></canvas>
+            </div>
+            <div class="chart">
+                <h3>Top 10 Categorias</h3>
+                <canvas id="categoria-chart" width="400" height="300"></canvas>
+            </div>
+            <div class="chart">
+                <h3>Top 10 Visualizações de Agosto</h3>
+                <canvas id="views-august-chart" width="400" height="300"></canvas>
+            </div>
+        </div>
+        
+        <div class="table-container">
+            <h3>Dados Detalhados</h3>
+            <div id="table-content">
+                <div class="loading">Carregando tabela...</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let allData = [];
+        let filteredData = [];
+               // Carregar dados
+        function loadData() {
+            fetch('/api/data')
+                .then(response => response.json())
+                .then(data => {
+                    allData = data;
+                    filteredData = [...allData];
+                    
+                    // Detectar fonte dos dados baseado na resposta
+                    if (data.length > 0) {
+                        // Verificar se os dados vieram do Google Sheets (tentativa de detecção)
+                        fetch('/api/refresh')
+                            .then(response => response.json())
+                            .then(result => {
+                                if (result.status === 'success') {
+                                    updateDataSourceIndicator('google-sheets', `Google Sheets (${data.length} registros)`);
+                                } else {
+                                    updateDataSourceIndicator('local-file', `Arquivo local (${data.length} registros)`);
+                                }
+                            })
+                            .catch(() => {
+                                updateDataSourceIndicator('local-file', `Arquivo local (${data.length} registros)`);
+                            });
+                    } else {
+                        updateDataSourceIndicator('local-file', 'Nenhum dado encontrado');
+                    }
+                    
+                    populateFilters();
+                    updateDashboard();
+                })
+                .catch(error => {
+                    console.error('Erro ao carregar dados:', error);
+                    updateDataSourceIndicator('local-file', 'Erro ao carregar dados');
+                });
+        
+        function populateFilters() {
+            // Filtrar e remover duplicatas, valores nulos/vazios
+            const cidades = [...new Set(allData
+                .map(item => item.Cidade)
+                .filter(c => c && c.trim() !== '' && c !== 'N/A' && c !== 'null' && c !== 'undefined')
+            )].sort();
+            
+            const status = [...new Set(allData
+                .map(item => item.Status)
+                .filter(s => s && s.trim() !== '' && s !== 'N/A' && s !== 'null' && s !== 'undefined')
+            )].sort();
+            
+            const categorias = [...new Set(allData
+                .map(item => item.Categoria)
+                .filter(c => c && c.trim() !== '' && c !== 'N/A' && c !== 'null' && c !== 'undefined')
+            )].sort();
+            
+            populateSelect('cidade-filter', cidades);
+            populateSelect('status-filter', status);
+            populateSelect('categoria-filter', categorias);
+        }
+        
+        function populateSelect(selectId, options) {
+            const select = document.getElementById(selectId);
+            
+            // Limpar opções existentes (exceto a primeira opção padrão)
+            while (select.children.length > 1) {
+                select.removeChild(select.lastChild);
+            }
+            
+            // Adicionar novas opções únicas
+            const uniqueOptions = [...new Set(options)].sort();
+            uniqueOptions.forEach(option => {
+                if (option && option.trim() !== '') { // Verificar se não é vazio
+                    const optionElement = document.createElement('option');
+                    optionElement.value = option;
+                    optionElement.textContent = option;
+                    select.appendChild(optionElement);
+                }
+            });
+        }
+        
+        // Atualizar dashboard
+        function updateDashboard() {
+            updateKPIs();
+            updateCharts();
+            updateTable();
+        }
+        
+        // Atualizar KPIs
+        function updateKPIs() {
+            const total = filteredData.length;
+            const aprovados = filteredData.filter(item => item.Status === 'APROVADO').length;
+            const reprovados = filteredData.filter(item => item.Status === 'REPROVADO').length;
+            const cidades = new Set(filteredData.map(item => item.Cidade).filter(c => c)).size;
+            
+            document.getElementById('kpis').innerHTML = `
+                <div class="kpi">
+                    <h3 style="color: #3498db;">${total}</h3>
+                    <p>Total de Veículos</p>
+                </div>
+                <div class="kpi">
+                    <h3 style="color: #27ae60;">${aprovados}</h3>
+                    <p>Aprovados</p>
+                </div>
+                <div class="kpi">
+                    <h3 style="color: #e74c3c;">${reprovados}</h3>
+                    <p>Reprovados</p>
+                </div>
+                <div class="kpi">
+                    <h3 style="color: #f39c12;">${cidades}</h3>
+                    <p>Cidades</p>
+                </div>
+            `;
+        }
+        
+        // Atualizar gráficos (versão simplificada)
+        function updateCharts() {
+            // Status chart
+            const statusCount = {};
+            filteredData.forEach(item => {
+                const status = item.Status || 'N/A';
+                statusCount[status] = (statusCount[status] || 0) + 1;
+            });
+            drawBarChart('status-chart', statusCount, 'Distribuição por Status');
+            
+            // Cidade chart
+            const cidadeCount = {};
+            filteredData.forEach(item => {
+                const cidade = item.Cidade || 'N/A';
+                if (cidade !== 'N/A') {
+                    cidadeCount[cidade] = (cidadeCount[cidade] || 0) + 1;
+                }
+            });
+            const topCidades = Object.entries(cidadeCount)
+                .sort(([,a], [,b]) => b - a)
+                .slice(0, 10)
+                .reduce((obj, [key, val]) => ({ ...obj, [key]: val }), {});
+            drawBarChart('cidade-chart', topCidades, 'Top 10 Cidades');
+            
+            // Categoria chart
+            const categoriaCount = {};
+            filteredData.forEach(item => {
+                const categoria = item.Categoria || 'N/A';
+                if (categoria !== 'N/A') {
+                    categoriaCount[categoria] = (categoriaCount[categoria] || 0) + 1;
+                }
+            });
+            const topCategorias = Object.entries(categoriaCount)
+                .sort(([,a], [,b]) => b - a)
+                .slice(0, 10)
+                .reduce((obj, [key, val]) => ({ ...obj, [key]: val }), {});
+            drawBarChart('categoria-chart', topCategorias, 'Top 10 Categorias');
+            
+            // Top 10 Visualizações de Agosto
+            loadTopViewsAugust();
+        }
+        
+        // Carregar Top 10 visualizações de agosto
+        async function loadTopViewsAugust() {
+            try {
+                const response = await fetch('/api/top-views-august');
+                const topViews = await response.json();
+                
+                const viewsData = {};
+                topViews.forEach(item => {
+                    const nome = item.nome.length > 15 ? item.nome.substring(0, 15) + '...' : item.nome;
+                    viewsData[nome] = item.views_agosto;
+                });
+                
+                drawBarChart('views-august-chart', viewsData, 'Top 10 Visualizações de Agosto');
+            } catch (error) {
+                console.error('Erro ao carregar top visualizações:', error);
+            }
+        }
+        
+        // Desenhar gráfico de barras simples
+        function drawBarChart(canvasId, data, title) {
+            const canvas = document.getElementById(canvasId);
+            const ctx = canvas.getContext('2d');
+            
+            // Limpar canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            const entries = Object.entries(data);
+            if (entries.length === 0) return;
+            
+            const maxValue = Math.max(...entries.map(([,value]) => value));
+            const barWidth = canvas.width / entries.length - 10;
+            const maxBarHeight = canvas.height - 60;
+            
+            entries.forEach(([label, value], index) => {
+                const barHeight = (value / maxValue) * maxBarHeight;
+                const x = index * (barWidth + 10) + 5;
+                const y = canvas.height - barHeight - 30;
+                
+                // Desenhar barra
+                ctx.fillStyle = `hsl(${index * 360 / entries.length}, 70%, 50%)`;
+                ctx.fillRect(x, y, barWidth, barHeight);
+                
+                // Desenhar valor
+                ctx.fillStyle = '#333';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(value, x + barWidth/2, y - 5);
+                
+                // Desenhar label (truncado se necessário)
+                const truncatedLabel = label.length > 10 ? label.substring(0, 10) + '...' : label;
+                ctx.save();
+                ctx.translate(x + barWidth/2, canvas.height - 10);
+                ctx.rotate(-Math.PI/4);
+                ctx.textAlign = 'right';
+                ctx.fillText(truncatedLabel, 0, 0);
+                ctx.restore();
+            });
+        }
+        
+        // Atualizar tabela
+        function updateTable() {
+            const tableData = filteredData.slice(0, 50); // Limitar a 50 registros
+            
+            let tableHTML = '<table><thead><tr>';
+            const columns = [
+                'Nome do veículo.\n', 
+                'Cidade', 
+                'Status',
+                'Categoria',
+                'Cookies',
+                'Expediente',
+                'Endereço no site',
+                'Total de vizualizações Junho',
+                'Total de Vizualizações Julho',
+                'Total de Vizualizações Agosto',
+                'Google analytics'
+            ];
+            columns.forEach(col => {
+                let displayName = col.replace('\n', '').replace('.', '');
+                // Simplificar nomes das colunas para melhor visualização
+                if (displayName === 'Total de vizualizações Junho') displayName = 'Views Jun';
+                if (displayName === 'Total de Vizualizações Julho') displayName = 'Views Jul';
+                if (displayName === 'Total de Vizualizações Agosto') displayName = 'Views Ago';
+                if (displayName === 'Google analytics') displayName = 'Analytics';
+                if (displayName === 'Endereço no site') displayName = 'Endereço';
+                
+                tableHTML += `<th>${displayName}</th>`;
+            });
+            tableHTML += '</tr></thead><tbody>';
+            
+            tableData.forEach(item => {
+                const status = item['Status'] || 'N/A';
+                const isReprovado = status === 'REPROVADO';
+                const rowClass = isReprovado ? ' class="reprovado"' : '';
+                
+                tableHTML += `<tr${rowClass}>`;
+                columns.forEach(col => {
+                    let value = item[col] || 'N/A';
+                    
+                    // Formatação especial para valores numéricos
+                    if (col.includes('Total de') && value !== 'N/A' && !isNaN(value)) {
+                        value = parseInt(value).toLocaleString();
+                    }
+                    
+                    // Truncar textos muito longos
+                    if (typeof value === 'string' && value.length > 50) {
+                        value = value.substring(0, 47) + '...';
+                    }
+                    
+                    tableHTML += `<td>${value}</td>`;
+                });
+                tableHTML += '</tr>';
+            });
+            
+            tableHTML += '</tbody></table>';
+            document.getElementById('table-content').innerHTML = tableHTML;
+        }
+        
+        // Event listeners para filtros
+        document.getElementById('cidade-filter').addEventListener('change', applyFilters);
+        document.getElementById('status-filter').addEventListener('change', applyFilters);
+        document.getElementById('categoria-filter').addEventListener('change', applyFilters);
+        
+        // Event listener para busca
+        let searchTimeout;
+        document.getElementById('search-input').addEventListener('input', function() {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(performSearch, 300); // Debounce de 300ms
+        });
+        
+        // Função de busca
+        async function performSearch() {
+            const query = document.getElementById('search-input').value.trim();
+            
+            if (query.length === 0) {
+                // Se não há busca, mostrar todos os dados filtrados
+                filteredData = allData.filter(item => {
+                    const cidadeFilter = document.getElementById('cidade-filter').value;
+                    const statusFilter = document.getElementById('status-filter').value;
+                    const categoriaFilter = document.getElementById('categoria-filter').value;
+                    
+                    return (cidadeFilter === 'all' || item.Cidade === cidadeFilter) &&
+                           (statusFilter === 'all' || item.Status === statusFilter) &&
+                           (categoriaFilter === 'all' || item.Categoria === categoriaFilter);
+                });
+            } else if (query.length >= 2) {
+                // Buscar apenas se tiver pelo menos 2 caracteres
+                try {
+                    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+                    const searchResults = await response.json();
+                    
+                    // Aplicar filtros aos resultados da busca
+                    const cidadeFilter = document.getElementById('cidade-filter').value;
+                    const statusFilter = document.getElementById('status-filter').value;
+                    const categoriaFilter = document.getElementById('categoria-filter').value;
+                    
+                    filteredData = searchResults.filter(item => {
+                        return (cidadeFilter === 'all' || item.Cidade === cidadeFilter) &&
+                               (statusFilter === 'all' || item.Status === statusFilter) &&
+                               (categoriaFilter === 'all' || item.Categoria === categoriaFilter);
+                    });
+                } catch (error) {
+                    console.error('Erro na busca:', error);
+                    return;
+                }
+            } else {
+                return; // Não buscar com menos de 2 caracteres
+            }
+            
+            updateDashboard();
+        }
+        
+        function applyFilters() {
+            // Limpar campo de busca quando usar filtros
+            document.getElementById('search-input').value = '';
+            
+            const cidadeFilter = document.getElementById('cidade-filter').value;
+            const statusFilter = document.getElementById('status-filter').value;
+            const categoriaFilter = document.getElementById('categoria-filter').value;
+            
+            filteredData = allData.filter(item => {
+                return (cidadeFilter === 'all' || item.Cidade === cidadeFilter) &&
+                       (statusFilter === 'all' || item.Status === statusFilter) &&
+                       (categoriaFilter === 'all' || item.Categoria === categoriaFilter);
+            });
+            
+            updateDashboard();
+        }
+        
+        // Carregar dados ao inicializar
+        loadData();
+        
+        // Função para gerar PDF
+        function generatePDF() {
+            // Mostrar loading
+            const originalButton = document.querySelector('.pdf-button');
+            const originalText = originalButton.innerHTML;
+            originalButton.innerHTML = '⏳ Gerando PDF...';
+            originalButton.disabled = true;
+            
+            // Configurações do PDF
+            const opt = {
+                margin: 1,
+                filename: 'dashboard-veiculos-comunicacao.pdf',
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { 
+                    scale: 2,
+                    useCORS: true,
+                    allowTaint: true,
+                    scrollX: 0,
+                    scrollY: 0
+                },
+                jsPDF: { 
+                    unit: 'in', 
+                    format: 'a4', 
+                    orientation: 'portrait' 
+                }
+            };
+            
+            // Gerar PDF
+            html2pdf().set(opt).from(document.querySelector('.container')).save().then(() => {
+                // Restaurar botão
+                originalButton.innerHTML = originalText;
+                originalButton.disabled = false;
+            }).catch((error) => {
+                console.error('Erro ao gerar PDF:', error);
+                alert('Erro ao gerar PDF. Tente novamente.');
+                originalButton.innerHTML = originalText;
+                originalButton.disabled = false;
+            });
+        }
+        
+        // Função para atualizar dados do Google Sheets
+        function refreshData() {
+            const refreshButton = document.querySelector('.refresh-button');
+            const originalText = refreshButton.innerHTML;
+            
+            // Mostrar loading
+            refreshButton.innerHTML = '⏳ Atualizando...';
+            refreshButton.disabled = true;
+            
+            // Fazer requisição para atualizar dados
+            fetch('/api/refresh')
+                .then(response => response.json())
+                .then(result => {
+                    if (result.status === 'success') {
+                        // Recarregar dados e atualizar dashboard
+                        loadData();
+                        updateDataSourceIndicator('google-sheets', `Google Sheets (${result.count} registros)`);
+                        alert('Dados atualizados com sucesso do Google Sheets!');
+                    } else {
+                        updateDataSourceIndicator('local-file', 'Arquivo local (Google Sheets indisponível)');
+                        alert('Erro ao atualizar: ' + result.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Erro ao atualizar dados:', error);
+                    updateDataSourceIndicator('local-file', 'Arquivo local (erro de conexão)');
+                    alert('Erro ao conectar com o servidor');
+                })
+                .finally(() => {
+                    // Restaurar botão
+                    refreshButton.innerHTML = originalText;
+                    refreshButton.disabled = false;
+                });
+        }
+        
+        // Função para atualizar indicador de fonte dos dados
+        function updateDataSourceIndicator(source, text) {
+            const indicator = document.getElementById('data-source');
+            const textElement = document.getElementById('data-source-text');
+            
+            // Remover classes existentes
+            indicator.classList.remove('google-sheets', 'local-file');
+            
+            // Adicionar nova classe
+            indicator.classList.add(source);
+            
+            // Atualizar texto
+            if (source === 'google-sheets') {
+                textElement.innerHTML = `🌐 Fonte: ${text} (Atualizado em tempo real)`;
+            } else {
+                textElement.innerHTML = `📁 Fonte: ${text}`;
+            }
+        }
+    </script>
+</body>
+</html>
