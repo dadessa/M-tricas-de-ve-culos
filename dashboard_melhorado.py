@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.4)
+Métricas de Veículos (v2.5)
 - Lê do Google Sheets via SHEETS_CSV_URL (CSV público) com cache-busting
 - "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, filtros)
 - Resolver robusto p/ colunas de visualizações (Junho/Julho/Agosto)
-- Exportar **Excel (BytesIO)** com formatação (xlsxwriter) e fallback (openpyxl)
+- Exportar **Excel** (BytesIO) -> dcc.send_bytes com função writer (compatibilidade ampla)
 - Exportar **PDF** (tabela formatada)
 - Tema claro/escuro, barras multicolor, REPROVADO em vermelho
 - Coluna 'motivo' após 'status' na tabela
@@ -233,7 +233,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.4", className="badge"),
+                html.Span("v2.5", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -639,7 +639,7 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.Data
     ]
     return dff[[c for c in cols_export if c in dff.columns]].copy()
 
-# ---- Excel (BytesIO; retorna bytes diretamente)
+# ---- Excel (BytesIO; writer function p/ máxima compatibilidade)
 @app.callback(
     Output("download_excel", "data"),
     Input("btn-export-excel", "n_clicks"),
@@ -653,21 +653,15 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
     df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
     engine = _excel_engine_available()
 
-    if engine is None:
-        # Sem engine: entrega CSV para não quebrar a UX
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
-        return dcc.send_bytes(
-            csv_bytes,
-            filename="metricas_de_veiculos.csv",
-            mime_type="text/csv"
-        )
+    # função writer para dcc.send_bytes (compatível com Dash mais antigo)
+    def _writer(b):
+        payload = _excel_bytes(df) if engine is not None else df.to_csv(index=False).encode("utf-8")
+        b.write(payload)
 
-    xlsx_bytes = _excel_bytes(df)
-    return dcc.send_bytes(
-        xlsx_bytes,
-        filename="metricas_de_veiculos.xlsx",
-        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    # se não tiver engine, baixará CSV para não quebrar UX (renomeado .csv)
+    if engine is None:
+        return dcc.send_bytes(_writer, "metricas_de_veiculos.csv")
+    return dcc.send_bytes(_writer, "metricas_de_veiculos.xlsx")
 
 # ---- PDF (tabela formatada)
 @app.callback(
