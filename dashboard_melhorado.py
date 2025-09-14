@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v1.7)
-- Tema claro por padrão (toggle claro/escuro)
-- Filtros (cidade/status/categoria) + busca por nome
-- KPIs, gráficos (ordenáveis) e tabela
-- REPROVADO vermelho; barras multicolor
-- Coluna 'motivo' após 'status' (mapeada a partir de "Motivo da reprovação")
-- Exportar CSV e Atualizar dados
-- **Atualiza dados direto do Google Sheets (CSV) via SHEETS_CSV_URL**
-- Atualiza as opções dos filtros ao clicar em “Atualizar dados”
+Métricas de Veículos (v1.9)
+- Lê do Google Sheets via SHEETS_CSV_URL (CSV público) com cache-busting
+- "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, opções de filtro)
+- Resolver robusto para colunas de visualizações (Junho/Julho/Agosto)
+- Limpeza numérica reforçada
+- Tema claro/escuro, barras multicolor, REPROVADO em vermelho
+- Coluna 'motivo' após 'status' na tabela
 """
 
 import os
@@ -18,160 +16,205 @@ import pandas as pd
 import plotly.express as px
 from dash import Dash, dcc, html, dash_table, Input, Output, State
 from dash.dcc import send_data_frame
-from dash.dash_table.Format import Format, Group, Scheme  # formatação numérica
+from dash.dash_table.Format import Format, Group, Scheme
 
-# ======== FONTES DE DADOS ========
-EXCEL_PATH = "Recadastramento (respostas).xlsx"  # fallback local
-SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")     # URL CSV pública do Google Sheets (defina no Render)
+# ========= FONTE DE DADOS =========
+EXCEL_PATH = "Recadastramento (respostas).xlsx"   # fallback local (dev)
+SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")      # defina no Render
 
 def _url_with_cache_bust(url: str) -> str:
-    """Evita cache adicionando um timestamp."""
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}_t={int(time.time())}"
 
-# ======== HELPERS ========
+# ========= HELPERS =========
 def _normalize(colname: str) -> str:
-    s = str(colname).strip().replace("\n", "")
+    s = str(colname).strip().replace("\n", " ")
     s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("utf-8")
-    s = s.lower().replace(" ", "_")
+    s = s.lower()
+    for ch in ["  ", "   "]:
+        s = s.replace(ch, " ")
+    s = s.replace(" ", "_")
     return s
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    s = s.str.replace(r"[^0-9,.-]", "", regex=True)
+    # remove tudo que não for dígito, ponto, vírgula ou sinal
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)
+    # troca vírgula por ponto (para 1.234,56 -> 1234.56)
     s = s.str.replace(",", ".", regex=False)
+    # colapsa múltiplos pontos (ex.: "1.234.567" -> "1234567")
+    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
+def _find_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+def _find_by_tokens(df: pd.DataFrame, tokens: list[str]) -> str | None:
+    # encontra a primeira coluna cujo nome contenha TODOS os tokens
+    for c in df.columns:
+        if all(tok in c for tok in tokens):
+            return c
+    return None
+
+def _resolve_views(df: pd.DataFrame, mes: str) -> str | None:
+    """
+    Tenta encontrar a coluna de visualizações do mês informado (mes in: 'junho','julho','agosto')
+    usando vários aliases e tokens. Retorna o nome da coluna encontrada ou None.
+    """
+    base_aliases = [
+        "visualizacoes", "vizualizacoes", "views", "pageviews", "page_views", "pageview"
+    ]
+    aliases = []
+    # exatos mais comuns
+    aliases += [f"visualizacoes_{mes}", f"vizualizacoes_{mes}",
+                f"total_de_visualizacoes_{mes}", f"total_de_vizualizacoes_{mes}"]
+    # combinações com prefixos/sufixos
+    for a in base_aliases:
+        aliases += [f"{a}_{mes}", f"{a}_de_{mes}", f"{a}__{mes}", f"{mes}_{a}"]
+    # tentativa 1: match exato por alias
+    hit = _find_first(df, aliases)
+    if hit:
+        return hit
+    # tentativa 2: por tokens (qualquer base_alias + mês)
+    for a in base_aliases:
+        hit = _find_by_tokens(df, [a, mes])
+        if hit:
+            return hit
+    # tentativa 3: abreviações do mês
+    abrevs = {"junho": ["jun"], "julho": ["jul"], "agosto": ["ago"]}[mes]
+    for ab in abrevs:
+        for a in base_aliases:
+            hit = _find_by_tokens(df, [a, ab])
+            if hit:
+                return hit
+    return None
 
 def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    original_cols = list(df.columns)
     df.columns = [_normalize(c) for c in df.columns]
+    print("[prepare] Colunas normalizadas:", df.columns.tolist())
 
-    # Renomeia variações comuns
-    df = df.rename(
-        columns={
-            "nome_do_veiculo.": "nome_fantasia",
-            "nome_empresarial_da_empresa_responsavel.": "razao_social",
-            "endereco_no_site": "endereco_site",
-            "url_ativa_do_veiculo.": "url",
-            "total_de_visualizacoes_junho": "visualizacoes_junho",
-            "total_de_vizualizacoes_junho": "visualizacoes_junho",
-            "total_de_visualizacoes_julho": "visualizacoes_julho",
-            "total_de_vizualizacoes_julho": "visualizacoes_julho",
-            "total_de_visualizacoes_agosto": "visualizacoes_agosto",
-            "total_de_vizualizacoes_agosto": "visualizacoes_agosto",
-        }
-    )
+    # ---- Nome do veículo
+    if "nome_fantasia" not in df.columns:
+        cand = _find_first(df, ["nome_do_veiculo", "nomedoveiculo", "nome", "nome_site", "site"])
+        if not cand:
+            cand = _find_by_tokens(df, ["nome", "veiculo"]) or _find_by_tokens(df, ["nome", "site"])
+        df["nome_fantasia"] = df[cand].astype(str) if cand else ""
+    df["nome_do_veiculo"] = df["nome_fantasia"].astype(str)
 
-    # Visualizações numéricas
-    for c in ["visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto"]:
-        if c not in df.columns:
-            df[c] = 0
-        df[c] = clean_numeric(df[c])
+    # ---- URL
+    if "url" not in df.columns:
+        cand = _find_first(df, ["url", "url_ativa_do_veiculo.", "url_ativa_do_veiculo", "url_do_site", "link"])
+        df["url"] = df[cand].astype(str) if cand else ""
 
-    df["total_visualizacoes"] = df[
-        ["visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto"]
-    ].sum(axis=1)
-
-    # Filtros
+    # ---- Campos de filtro
     for c in ["cidade", "categoria", "status"]:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
         else:
             df[c] = "Não informado"
-
     if "status" in df.columns:
         df["status"] = df["status"].astype(str).str.upper()
 
-    # Identificação
-    if "nome_fantasia" not in df.columns:
-        df["nome_fantasia"] = ""
-    df["nome_do_veiculo"] = df["nome_fantasia"].astype(str)
-    if "url" not in df.columns:
-        df["url"] = ""
-
-    # Motivo da reprovação → motivo
+    # ---- Motivo (da reprovação)
     motivo_aliases = [
         "motivo", "motivo_da_reprovacao", "motivo_de_reprovacao",
         "motivo_reprovacao", "motivo_reprova", "motivo_reprov",
     ]
-    found = None
-    for c in df.columns:
-        if c in motivo_aliases:
-            found = c
-            break
-        if ("motivo" in c) and ("reprov" in c):
-            found = c
-            break
-    if found and found != "motivo":
-        df["motivo"] = df[found].astype(str)
+    mot = _find_first(df, motivo_aliases) or _find_by_tokens(df, ["motivo", "reprov"])
+    if mot and mot != "motivo":
+        df["motivo"] = df[mot].astype(str)
     elif "motivo" not in df.columns:
         df["motivo"] = ""
     df["motivo"] = df["motivo"].fillna("").astype(str).str.strip()
 
+    # ---- Visualizações por mês (resolver robusto)
+    for mes in ["junho", "julho", "agosto"]:
+        col = _resolve_views(df, mes)
+        if col:
+            df[f"visualizacoes_{mes}"] = clean_numeric(df[col])
+        else:
+            print(f"[prepare] NÃO encontrei coluna de visualizações de {mes.upper()} nas colunas originais:", original_cols)
+            df[f"visualizacoes_{mes}"] = 0.0
+
+    df["total_visualizacoes"] = (
+        df["visualizacoes_junho"] + df["visualizacoes_julho"] + df["visualizacoes_agosto"]
+    )
+
+    print("[prepare] Usando views ->",
+          "junho:", _resolve_views(df, "junho"),
+          "| julho:", _resolve_views(df, "julho"),
+          "| agosto:", _resolve_views(df, "agosto"))
+    print("[prepare] Somas -> jun:", df["visualizacoes_junho"].sum(),
+          "jul:", df["visualizacoes_julho"].sum(),
+          "ago:", df["visualizacoes_agosto"].sum())
+
     return df
 
 def load_data() -> pd.DataFrame:
-    # 1) tenta Google Sheets (CSV público)
+    # Sheets (CSV)
     if SHEETS_CSV_URL:
         try:
             url = _url_with_cache_bust(SHEETS_CSV_URL)
             raw = pd.read_csv(url)
+            print("[load_data] Sheets OK. Linhas:", len(raw), "Colunas originais:", list(raw.columns))
             return _prepare_df(raw)
         except Exception as e:
             print("[load_data] Falha lendo SHEETS_CSV_URL:", e)
+    # Excel (dev)
+    try:
+        base = pd.read_excel(EXCEL_PATH)
+        print("[load_data] Excel local OK. Linhas:", len(base))
+        return _prepare_df(base)
+    except Exception as e:
+        print("[load_data] Excel local indisponível e Sheets falhou:", e)
+        cols = [
+            "nome_fantasia","nome_do_veiculo","cidade","status","motivo",
+            "categoria","visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto",
+            "total_visualizacoes","url"
+        ]
+        empty = pd.DataFrame(columns=cols)
+        return _prepare_df(empty)
 
-    # 2) fallback: Excel local (desenvolvimento)
-    base = pd.read_excel(EXCEL_PATH)
-    return _prepare_df(base)
-
-# Carrega base inicial (para montar filtros na primeira renderização)
+# Base inicial para montar filtros da primeira vez
 DF_BASE = load_data()
 
-# ======== TEMA / CORES ========
+# ========= TEMA/CORES =========
 THEME_COLORS = {
     "light": {
-        "font": "#0F172A",
-        "muted": "#64748B",
-        "grid": "#E9EDF5",
-        "paper": "rgba(0,0,0,0)",
-        "plot": "rgba(0,0,0,0)",
-        "colorway": ["#3B82F6", "#22C55E", "#F59E0B", "#EF4444", "#06B6D4", "#A78BFA"],
+        "font": "#0F172A", "muted": "#64748B", "grid": "#E9EDF5",
+        "paper": "rgba(0,0,0,0)", "plot": "rgba(0,0,0,0)",
+        "colorway": ["#3B82F6","#22C55E","#F59E0B","#EF4444","#06B6D4","#A78BFA"],
         "template": "plotly_white",
     },
     "dark": {
-        "font": "#E6ECFF",
-        "muted": "#93A3BE",
-        "grid": "#22304A",
-        "paper": "rgba(0,0,0,0)",
-        "plot": "rgba(0,0,0,0)",
-        "colorway": ["#60A5FA", "#34D399", "#FBBF24", "#F87171", "#22D3EE", "#CABFFD"],
+        "font": "#E6ECFF", "muted": "#93A3BE", "grid": "#22304A",
+        "paper": "rgba(0,0,0,0)", "plot": "rgba(0,0,0,0)",
+        "colorway": ["#60A5FA","#34D399","#FBBF24","#F87171","#22D3EE","#CABFFD"],
         "template": "plotly_dark",
     },
 }
 EXTENDED_SEQ = {
-    "light": [
-        "#3B82F6","#22C55E","#F59E0B","#EF4444","#06B6D4","#A78BFA",
-        "#10B981","#F43F5E","#8B5CF6","#14B8A6","#EAB308","#0EA5E9",
-    ],
-    "dark": [
-        "#60A5FA","#34D399","#FBBF24","#F87171","#22D3EE","#CABFFD",
-        "#4ADE80","#FB7185","#A78BFA","#2DD4BF","#FACC15","#38BDF8",
-    ],
+    "light": ["#3B82F6","#22C55E","#F59E0B","#EF4444","#06B6D4","#A78BFA",
+              "#10B981","#F43F5E","#8B5CF6","#14B8A6","#EAB308","#0EA5E9"],
+    "dark":  ["#60A5FA","#34D399","#FBBF24","#F87171","#22D3EE","#CABFFD",
+              "#4ADE80","#FB7185","#A78BFA","#2DD4BF","#FACC15","#38BDF8"],
 }
 def get_sequence(theme: str, n: int):
     seq = EXTENDED_SEQ.get(theme, EXTENDED_SEQ["light"])
-    if n <= len(seq):
-        return seq[:n]
+    if n <= len(seq): return seq[:n]
     times = (n // len(seq)) + 1
     return (seq * times)[:n]
 
 def style_fig(fig, theme="light"):
     c = THEME_COLORS[theme]
     fig.update_layout(
-        template=c["template"],
-        colorway=c["colorway"],
-        paper_bgcolor=c["paper"],
-        plot_bgcolor=c["plot"],
+        template=c["template"], colorway=c["colorway"],
+        paper_bgcolor=c["paper"], plot_bgcolor=c["plot"],
         font=dict(color=c["font"], size=13),
         title=dict(font=dict(color=c["font"], size=16)),
         legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=c["font"])),
@@ -179,26 +222,19 @@ def style_fig(fig, theme="light"):
         uniformtext_minsize=12, uniformtext_mode="hide",
         hoverlabel=dict(
             bgcolor="rgba(15,23,42,0.95)" if theme == "dark" else "#ffffff",
-            font_color=c["font"],
-            bordercolor="rgba(0,0,0,0)",
+            font_color=c["font"], bordercolor="rgba(0,0,0,0)",
         ),
     )
-    fig.update_xaxes(
-        gridcolor=c["grid"], zerolinecolor=c["grid"],
-        tickfont=dict(color=c["font"]), title_font=dict(color=c["font"]),
-    )
-    fig.update_yaxes(
-        gridcolor=c["grid"], zerolinecolor=c["grid"],
-        tickfont=dict(color=c["font"]), title_font=dict(color=c["font"]),
-    )
+    fig.update_xaxes(gridcolor=c["grid"], zerolinecolor=c["grid"],
+                     tickfont=dict(color=c["font"]), title_font=dict(color=c["font"]))
+    fig.update_yaxes(gridcolor=c["grid"], zerolinecolor=c["grid"],
+                     tickfont=dict(color=c["font"]), title_font=dict(color=c["font"]))
     fig.update_traces(selector=dict(type="bar"),
-        textfont_color=c["font"],
-        marker_line_width=0,
-        opacity=0.95 if theme == "dark" else 1.0,
-    )
+                      textfont_color=c["font"], marker_line_width=0,
+                      opacity=0.95 if theme == "dark" else 1.0)
     return fig
 
-# ======== APP ========
+# ========= APP =========
 app = Dash(__name__)
 server = app.server
 
@@ -208,16 +244,15 @@ def kpi_card(kpi_id: str, label: str):
         html.H2(id=kpi_id, className="kpi-value"),
     ])
 
-# Tema claro por padrão
+# claro por padrão
 app.layout = html.Div(className="light", id="root", children=[
     html.Div(className="container", children=[
-
         # Navbar
         html.Div(className="navbar", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v1.7", className="badge"),
+                html.Span("v1.9", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -302,9 +337,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="card", children=[
                 dash_table.DataTable(
                     id="tbl",
-                    page_size=12,
-                    sort_action="native",
-                    filter_action="native",
+                    page_size=12, sort_action="native", filter_action="native",
                     fixed_rows={"headers": True},
                     style_table={"overflowX": "auto", "minWidth": "100%"},
                     style_cell={
@@ -333,15 +366,12 @@ app.layout = html.Div(className="light", id="root", children=[
     ]),
 ])
 
-# ======== CALLBACKS ========
+# ========= CALLBACKS =========
 def _filtrar(base: pd.DataFrame, cidade, status, categoria, termo) -> pd.DataFrame:
     dff = base.copy()
-    if cidade:
-        dff = dff[dff["cidade"].isin(cidade)]
-    if status:
-        dff = dff[dff["status"].isin(status)]
-    if categoria:
-        dff = dff[dff["categoria"].isin(categoria)]
+    if cidade:   dff = dff[dff["cidade"].isin(cidade)]
+    if status:   dff = dff[dff["status"].isin(status)]
+    if categoria:dff = dff[dff["categoria"].isin(categoria)]
     if termo and str(termo).strip():
         alvo = "nome_fantasia" if "nome_fantasia" in dff.columns else (
             "nome_do_veiculo" if "nome_do_veiculo" in dff.columns else dff.columns[0]
@@ -350,8 +380,7 @@ def _filtrar(base: pd.DataFrame, cidade, status, categoria, termo) -> pd.DataFra
     return dff
 
 @app.callback(Output("root", "className"), Input("theme-toggle", "value"))
-def set_theme(theme):
-    return "light" if theme == "light" else "dark"
+def set_theme(theme): return "light" if theme == "light" else "dark"
 
 # Atualiza KPI/Gráficos/Tabela
 @app.callback(
@@ -370,10 +399,11 @@ def set_theme(theme):
     Input("f_categoria", "value"),
     Input("f_busca", "value"),
     Input("sort-order", "value"),
-    Input("btn-reload", "n_clicks"),
+    Input("btn-reload", "n_clicks"),    # <= ao clicar, recarrega da planilha
     State("theme-toggle", "value"),
 )
 def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
+    # Recarrega TODAS as colunas da planilha ao clicar em Atualizar
     base = load_data() if (n_reload and n_reload > 0) else DF_BASE
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
     ascending = (order == "asc")
@@ -429,7 +459,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
         fig_cidades = px.bar(title="Top 10 Cidades")
     style_fig(fig_cidades, theme)
 
-    # Visualizações por mês
+    # Visualizações por mês (garantido pelo _prepare_df)
     vj = float(dff["visualizacoes_junho"].sum()) if "visualizacoes_junho" in dff else 0.0
     vl = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
     va = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
@@ -469,25 +499,20 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
         fig_sites = px.bar(title="Top 10 Sites (Total de Visualizações)")
     style_fig(fig_sites, theme)
 
-    # Tabela
+    # Tabela (todas as colunas são recarregadas da planilha ao clicar em Atualizar)
     cols_order = [
         "nome_do_veiculo", "cidade", "status", "motivo",
         "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
     ]
     friendly = {
         "nome_do_veiculo": "Nome do Veículo",
-        "cidade": "Cidade",
-        "status": "Status",
-        "motivo": "Motivo",
-        "categoria": "Categoria",
+        "cidade": "Cidade", "status": "Status", "motivo": "Motivo", "categoria": "Categoria",
         "visualizacoes_junho": "Visualizações Junho",
         "visualizacoes_julho": "Visualizações Julho",
         "visualizacoes_agosto": "Visualizações Agosto",
     }
     present = [c for c in cols_order if c in dff.columns]
-
-    fmt_int = Format(group=Group.yes, groups=3,
-                     group_delimiter=".", decimal_delimiter=",",
+    fmt_int = Format(group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",",
                      precision=0, scheme=Scheme.fixed)
     columns = []
     for c in present:
@@ -495,7 +520,6 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
         if c.startswith("visualizacoes_"):
             col_def.update({"type": "numeric", "format": fmt_int})
         columns.append(col_def)
-
     data = dff[present].to_dict("records")
 
     return (
@@ -504,7 +528,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
         data, columns,
     )
 
-# Atualiza as opções dos filtros quando clicar em "Atualizar dados"
+# Atualiza opções dos filtros ao clicar em "Atualizar dados"
 @app.callback(
     Output("f_cidade", "options"),
     Output("f_status", "options"),
@@ -537,7 +561,7 @@ def exportar_csv(n, f_cidade, f_status, f_categoria, f_busca):
         "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
     ]
     cols_export = [c for c in cols_export if c in dff.columns]
-    return send_data_frame(dff[cols_export].to_csv, "dados_observatorio.csv", index=False)
+    return send_data_frame(dff[cols_export].to_csv, "metricas_de_veiculos.csv", index=False)
 
 # RUN
 if __name__ == "__main__":
