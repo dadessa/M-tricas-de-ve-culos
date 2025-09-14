@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v1.9)
+Métricas de Veículos (v2.0)
 - Lê do Google Sheets via SHEETS_CSV_URL (CSV público) com cache-busting
-- "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, opções de filtro)
-- Resolver robusto para colunas de visualizações (Junho/Julho/Agosto)
-- Limpeza numérica reforçada
+- "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, filtros)
+- Resolver robusto p/ colunas de visualizações (Junho/Julho/Agosto)
+- Exportar **Excel (formatado)** e **PDF**
 - Tema claro/escuro, barras multicolor, REPROVADO em vermelho
 - Coluna 'motivo' após 'status' na tabela
 """
 
 import os
 import time
+import io
 import unicodedata
 import pandas as pd
 import plotly.express as px
@@ -38,12 +39,9 @@ def _normalize(colname: str) -> str:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    # remove tudo que não for dígito, ponto, vírgula ou sinal
-    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)
-    # troca vírgula por ponto (para 1.234,56 -> 1234.56)
-    s = s.str.replace(",", ".", regex=False)
-    # colapsa múltiplos pontos (ex.: "1.234.567" -> "1234567")
-    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)   # mantém dígitos, sinais e separadores
+    s = s.str.replace(",", ".", regex=False)            # vírgula -> ponto
+    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)  # remove pontos de milhar
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
 def _find_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -53,43 +51,27 @@ def _find_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 def _find_by_tokens(df: pd.DataFrame, tokens: list[str]) -> str | None:
-    # encontra a primeira coluna cujo nome contenha TODOS os tokens
     for c in df.columns:
         if all(tok in c for tok in tokens):
             return c
     return None
 
 def _resolve_views(df: pd.DataFrame, mes: str) -> str | None:
-    """
-    Tenta encontrar a coluna de visualizações do mês informado (mes in: 'junho','julho','agosto')
-    usando vários aliases e tokens. Retorna o nome da coluna encontrada ou None.
-    """
-    base_aliases = [
-        "visualizacoes", "vizualizacoes", "views", "pageviews", "page_views", "pageview"
-    ]
-    aliases = []
-    # exatos mais comuns
-    aliases += [f"visualizacoes_{mes}", f"vizualizacoes_{mes}",
-                f"total_de_visualizacoes_{mes}", f"total_de_vizualizacoes_{mes}"]
-    # combinações com prefixos/sufixos
+    base_aliases = ["visualizacoes", "vizualizacoes", "views", "pageviews", "page_views", "pageview"]
+    aliases = [f"visualizacoes_{mes}", f"vizualizacoes_{mes}",
+               f"total_de_visualizacoes_{mes}", f"total_de_vizualizacoes_{mes}"]
     for a in base_aliases:
         aliases += [f"{a}_{mes}", f"{a}_de_{mes}", f"{a}__{mes}", f"{mes}_{a}"]
-    # tentativa 1: match exato por alias
     hit = _find_first(df, aliases)
-    if hit:
-        return hit
-    # tentativa 2: por tokens (qualquer base_alias + mês)
+    if hit: return hit
     for a in base_aliases:
         hit = _find_by_tokens(df, [a, mes])
-        if hit:
-            return hit
-    # tentativa 3: abreviações do mês
+        if hit: return hit
     abrevs = {"junho": ["jun"], "julho": ["jul"], "agosto": ["ago"]}[mes]
     for ab in abrevs:
         for a in base_aliases:
             hit = _find_by_tokens(df, [a, ab])
-            if hit:
-                return hit
+            if hit: return hit
     return None
 
 def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -98,7 +80,7 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [_normalize(c) for c in df.columns]
     print("[prepare] Colunas normalizadas:", df.columns.tolist())
 
-    # ---- Nome do veículo
+    # Nome do veículo
     if "nome_fantasia" not in df.columns:
         cand = _find_first(df, ["nome_do_veiculo", "nomedoveiculo", "nome", "nome_site", "site"])
         if not cand:
@@ -106,12 +88,12 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         df["nome_fantasia"] = df[cand].astype(str) if cand else ""
     df["nome_do_veiculo"] = df["nome_fantasia"].astype(str)
 
-    # ---- URL
+    # URL
     if "url" not in df.columns:
         cand = _find_first(df, ["url", "url_ativa_do_veiculo.", "url_ativa_do_veiculo", "url_do_site", "link"])
         df["url"] = df[cand].astype(str) if cand else ""
 
-    # ---- Campos de filtro
+    # Campos de filtro
     for c in ["cidade", "categoria", "status"]:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
@@ -120,11 +102,9 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     if "status" in df.columns:
         df["status"] = df["status"].astype(str).str.upper()
 
-    # ---- Motivo (da reprovação)
-    motivo_aliases = [
-        "motivo", "motivo_da_reprovacao", "motivo_de_reprovacao",
-        "motivo_reprovacao", "motivo_reprova", "motivo_reprov",
-    ]
+    # Motivo (da reprovação)
+    motivo_aliases = ["motivo", "motivo_da_reprovacao", "motivo_de_reprovacao",
+                      "motivo_reprovacao", "motivo_reprova", "motivo_reprov"]
     mot = _find_first(df, motivo_aliases) or _find_by_tokens(df, ["motivo", "reprov"])
     if mot and mot != "motivo":
         df["motivo"] = df[mot].astype(str)
@@ -132,7 +112,7 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         df["motivo"] = ""
     df["motivo"] = df["motivo"].fillna("").astype(str).str.strip()
 
-    # ---- Visualizações por mês (resolver robusto)
+    # Visualizações por mês
     for mes in ["junho", "julho", "agosto"]:
         col = _resolve_views(df, mes)
         if col:
@@ -156,7 +136,6 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def load_data() -> pd.DataFrame:
-    # Sheets (CSV)
     if SHEETS_CSV_URL:
         try:
             url = _url_with_cache_bust(SHEETS_CSV_URL)
@@ -165,7 +144,6 @@ def load_data() -> pd.DataFrame:
             return _prepare_df(raw)
         except Exception as e:
             print("[load_data] Falha lendo SHEETS_CSV_URL:", e)
-    # Excel (dev)
     try:
         base = pd.read_excel(EXCEL_PATH)
         print("[load_data] Excel local OK. Linhas:", len(base))
@@ -180,7 +158,7 @@ def load_data() -> pd.DataFrame:
         empty = pd.DataFrame(columns=cols)
         return _prepare_df(empty)
 
-# Base inicial para montar filtros da primeira vez
+# Base inicial para montar filtros
 DF_BASE = load_data()
 
 # ========= TEMA/CORES =========
@@ -252,7 +230,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v1.9", className="badge"),
+                html.Span("v2.0", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -264,8 +242,10 @@ app.layout = html.Div(className="light", id="root", children=[
                     style={"marginRight": "8px"},
                 ),
                 html.Button("Atualizar dados", id="btn-reload", n_clicks=0, className="btn ghost"),
-                html.Button("Exportar CSV", id="btn-export", n_clicks=0, className="btn"),
-                dcc.Download(id="download"),
+                html.Button("Exportar Excel", id="btn-export-excel", n_clicks=0, className="btn"),
+                html.Button("Exportar PDF", id="btn-export-pdf", n_clicks=0, className="btn"),
+                dcc.Download(id="download_excel"),
+                dcc.Download(id="download_pdf"),
             ]),
         ]),
 
@@ -399,16 +379,14 @@ def set_theme(theme): return "light" if theme == "light" else "dark"
     Input("f_categoria", "value"),
     Input("f_busca", "value"),
     Input("sort-order", "value"),
-    Input("btn-reload", "n_clicks"),    # <= ao clicar, recarrega da planilha
+    Input("btn-reload", "n_clicks"),
     State("theme-toggle", "value"),
 )
 def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
-    # Recarrega TODAS as colunas da planilha ao clicar em Atualizar
     base = load_data() if (n_reload and n_reload > 0) else DF_BASE
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
     ascending = (order == "asc")
 
-    # KPIs
     total = int(len(dff))
     aprov = int((dff["status"] == "APROVADO").sum()) if "status" in dff else 0
     reprov = int((dff["status"] == "REPROVADO").sum()) if "status" in dff else 0
@@ -459,7 +437,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
         fig_cidades = px.bar(title="Top 10 Cidades")
     style_fig(fig_cidades, theme)
 
-    # Visualizações por mês (garantido pelo _prepare_df)
+    # Visualizações por mês
     vj = float(dff["visualizacoes_junho"].sum()) if "visualizacoes_junho" in dff else 0.0
     vl = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
     va = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
@@ -499,7 +477,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
         fig_sites = px.bar(title="Top 10 Sites (Total de Visualizações)")
     style_fig(fig_sites, theme)
 
-    # Tabela (todas as colunas são recarregadas da planilha ao clicar em Atualizar)
+    # Tabela
     cols_order = [
         "nome_do_veiculo", "cidade", "status", "motivo",
         "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
@@ -543,30 +521,167 @@ def refresh_filter_options(n):
     cats    = [{"label": c, "value": c} for c in sorted(d["categoria"].dropna().unique())] if "categoria" in d else []
     return cidades, status, cats
 
-# Exportar CSV
-@app.callback(
-    Output("download", "data"),
-    Input("btn-export", "n_clicks"),
-    State("f_cidade", "value"),
-    State("f_status", "value"),
-    State("f_categoria", "value"),
-    State("f_busca", "value"),
-    prevent_initial_call=True,
-)
-def exportar_csv(n, f_cidade, f_status, f_categoria, f_busca):
+# ========= EXPORTS =========
+def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.DataFrame:
     base = load_data()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
     cols_export = [
         "nome_do_veiculo", "cidade", "status", "motivo",
         "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
     ]
-    cols_export = [c for c in cols_export if c in dff.columns]
-    return send_data_frame(dff[cols_export].to_csv, "metricas_de_veiculos.csv", index=False)
+    return dff[[c for c in cols_export if c in dff.columns]].copy()
 
-# RUN
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8050))
-    try:
-        app.run(debug=True, host="0.0.0.0", port=port)
-    except AttributeError:
-        app.run_server(debug=True, host="0.0.0.0", port=port)
+# ---- Excel (formatado)
+@app.callback(
+    Output("download_excel", "data"),
+    Input("btn-export-excel", "n_clicks"),
+    State("f_cidade", "value"),
+    State("f_status", "value"),
+    State("f_categoria", "value"),
+    State("f_busca", "value"),
+    prevent_initial_call=True
+)
+def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
+    df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
+
+    def _to_excel(bytes_io):
+        with pd.ExcelWriter(bytes_io, engine="xlsxwriter") as writer:
+            df.to_excel(writer, sheet_name="Dados", index=False)
+            wb  = writer.book
+            ws  = writer.sheets["Dados"]
+
+            # Formatações
+            header_fmt = wb.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#111827"})
+            wrap_fmt   = wb.add_format({"text_wrap": True})
+            num_fmt    = wb.add_format({"num_format": "#,##0", "align": "right"})
+
+            # Cabeçalho
+            ws.set_row(0, 22, header_fmt)
+
+            # Larguras + wrap para textos longos
+            col_widths = {
+                "nome_do_veiculo": 40,
+                "cidade": 16,
+                "status": 16,
+                "motivo": 50,
+                "categoria": 22,
+                "visualizacoes_junho": 18,
+                "visualizacoes_julho": 18,
+                "visualizacoes_agosto": 18,
+            }
+            for idx, col in enumerate(df.columns):
+                width = col_widths.get(col, 18)
+                if col.startswith("visualizacoes_"):
+                    ws.set_column(idx, idx, width, num_fmt)
+                elif col in ["nome_do_veiculo", "motivo", "categoria"]:
+                    ws.set_column(idx, idx, width, wrap_fmt)
+                else:
+                    ws.set_column(idx, idx, width)
+
+            # Tabela com estilo
+            nrows = len(df)
+            ncols = len(df.columns)
+            ws.add_table(0, 0, nrows, ncols - 1, {
+                "style": "Table Style Medium 9",
+                "columns": [{"header": h} for h in df.columns],
+                # formatos de colunas numéricas mantidos por set_column acima
+            })
+
+            # Congela cabeçalho e filtro automático
+            ws.freeze_panes(1, 0)
+            ws.autofilter(0, 0, nrows, ncols - 1)
+
+    return dcc.send_bytes(_to_excel, "metricas_de_veiculos.xlsx")
+
+# ---- PDF (tabela formatada)
+@app.callback(
+    Output("download_pdf", "data"),
+    Input("btn-export-pdf", "n_clicks"),
+    State("f_cidade", "value"),
+    State("f_status", "value"),
+    State("f_categoria", "value"),
+    State("f_busca", "value"),
+    prevent_initial_call=True
+)
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
+    df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
+
+    def _to_pdf(bytes_io):
+        # ReportLab
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.units import mm
+
+        doc = SimpleDocTemplate(
+            bytes_io,
+            pagesize=landscape(A4),
+            leftMargin=12*mm, rightMargin=12*mm, topMargin=12*mm, bottomMargin=12*mm
+        )
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("title", parent=styles["Heading2"], alignment=0, fontSize=14, textColor=colors.HexColor("#111827"))
+        header_style = ParagraphStyle("header", parent=styles["Normal"], fontSize=9, textColor=colors.white)
+        cell_text = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8, leading=10)
+        cell_wrap = ParagraphStyle("cell_wrap", parent=cell_text, wordWrap="CJK")
+
+        elements = []
+        elements.append(Paragraph("Métricas de Veículos — Dados detalhados", title_style))
+        elements.append(Spacer(1, 6))
+
+        # Cabeçalhos
+        headers = [ "Nome do Veículo", "Cidade", "Status", "Motivo", "Categoria",
+                    "Visualizações Junho", "Visualizações Julho", "Visualizações Agosto" ]
+        # Garante que só use colunas presentes
+        col_keys = ["nome_do_veiculo","cidade","status","motivo","categoria",
+                    "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto"]
+        col_keys = [c for c in col_keys if c in df.columns]
+        headers   = [h for h, k in zip(headers, ["nome_do_veiculo","cidade","status","motivo","categoria",
+                    "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto"]) if k in col_keys or k in df.columns]
+
+        # Monta dados (Paragraph para textos longos; números formatados)
+        data = [ [Paragraph(h, header_style)] for h in headers ]
+        # Convert data to horizontal header row
+        data = [ [Paragraph(h, header_style) for h in headers] ]
+
+        def fmt_int(x):
+            try:
+                return str(f"{int(round(float(x))):,}").replace(",", ".")
+            except:
+                return str(x)
+
+        for _, row in df[col_keys].iterrows():
+            line = []
+            for k in col_keys:
+                val = row[k]
+                if k.startswith("visualizacoes_"):
+                    line.append(Paragraph(fmt_int(val), cell_text))
+                elif k in ["nome_do_veiculo","motivo","categoria"]:
+                    line.append(Paragraph(str(val), cell_wrap))
+                else:
+                    line.append(Paragraph(str(val), cell_text))
+            data.append(line)
+
+        # Larguras aproximadas (em mm) -> convertidas para pontos
+        width_map = {
+            "nome_do_veiculo": 70,
+            "cidade": 30,
+            "status": 26,
+            "motivo": 90,
+            "categoria": 40,
+            "visualizacoes_junho": 32,
+            "visualizacoes_julho": 32,
+            "visualizacoes_agosto": 32,
+        }
+        col_widths = [ width_map.get(k, 32) * mm for k in col_keys ]
+
+        table = Table(data, colWidths=col_widths, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
+            ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
+            ("ALIGN",      (0,0), (-1,0), "CENTER"),
+            ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
+
+            ("GRID",       (0,0), (-1,-1), 0.25, colors.HexColor("#D1D5DB")),
+            ("VALIGN",     (0,0), (-1,-1)
