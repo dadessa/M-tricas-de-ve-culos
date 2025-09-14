@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.2)
+Métricas de Veículos (v2.3)
 - Lê do Google Sheets via SHEETS_CSV_URL (CSV público) com cache-busting
 - "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, filtros)
 - Resolver robusto p/ colunas de visualizações (Junho/Julho/Agosto)
-- Exportar **Excel (formatado)** com fallback (xlsxwriter -> openpyxl)
+- Exportar **Excel (BytesIO)** com formatação (xlsxwriter) e fallback (openpyxl)
 - Exportar **PDF** (tabela formatada)
 - Tema claro/escuro, barras multicolor, REPROVADO em vermelho
 - Coluna 'motivo' após 'status' na tabela
@@ -13,10 +13,13 @@ Métricas de Veículos (v2.2)
 import os
 import time
 import unicodedata
+from io import BytesIO
+
 import pandas as pd
 import plotly.express as px
-from dash import Dash, dcc, html, dash_table, Input, Output, State
-from dash.dash_table.Format import Format, Group, Scheme  # formatação DataTable
+from dash import Dash, dcc, html, dash_table
+from dash import Input, Output, State
+from dash.dash_table.Format import Format, Group, Scheme
 
 # ========= FONTE DE DADOS =========
 EXCEL_PATH = "Recadastramento (respostas).xlsx"   # fallback local (dev)
@@ -38,9 +41,9 @@ def _normalize(colname: str) -> str:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)                 # mantém dígitos, sinais e separadores
-    s = s.str.replace(",", ".", regex=False)                          # vírgula -> ponto
-    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)  # remove pontos de milhar
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)
+    s = s.str.replace(",", ".", regex=False)
+    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
 def _find_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -229,7 +232,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.2", className="badge"),
+                html.Span("v2.3", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -532,32 +535,31 @@ def _excel_engine_available() -> str | None:
         except Exception:
             return None
 
-def _write_excel_to_bytesio(df: pd.DataFrame, bytes_io):
+def _excel_bytes(df: pd.DataFrame) -> bytes:
     """
-    Escreve o DataFrame em bytes_io.
-    Usa xlsxwriter (formatação completa). Se não houver, usa openpyxl (formatação básica).
+    Gera bytes de um arquivo .xlsx (em memória).
+    Usa xlsxwriter (formatação completa) ou openpyxl (formatação básica).
     """
     engine = _excel_engine_available()
     if engine is None:
+        # Sem engines — avisa no log e devolve CSV para não quebrar o download
         print("[export_excel] Nenhum engine Excel encontrado — instale xlsxwriter/openpyxl.")
-        bytes_io.write(df.to_csv(index=False).encode("utf-8"))
-        return
+        return df.to_csv(index=False).encode("utf-8")
+
+    bio = BytesIO()
 
     if engine == "xlsxwriter":
-        with pd.ExcelWriter(bytes_io, engine="xlsxwriter") as writer:
+        with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
             df.to_excel(writer, sheet_name="Dados", index=False)
             wb  = writer.book
             ws  = writer.sheets["Dados"]
 
-            # Formatações
             header_fmt = wb.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#111827"})
             wrap_fmt   = wb.add_format({"text_wrap": True})
             num_fmt    = wb.add_format({"num_format": "#,##0", "align": "right"})
 
-            # Cabeçalho
             ws.set_row(0, 22, header_fmt)
 
-            # Larguras + wrap para textos longos
             col_widths = {
                 "nome_do_veiculo": 40,
                 "cidade": 16,
@@ -577,7 +579,6 @@ def _write_excel_to_bytesio(df: pd.DataFrame, bytes_io):
                 else:
                     ws.set_column(idx, idx, width)
 
-            # Tabela com estilo
             nrows = len(df)
             ncols = len(df.columns)
             ws.add_table(0, 0, nrows, ncols - 1, {
@@ -585,26 +586,26 @@ def _write_excel_to_bytesio(df: pd.DataFrame, bytes_io):
                 "columns": [{"header": h} for h in df.columns],
             })
 
-            # Congela cabeçalho e filtro automático
             ws.freeze_panes(1, 0)
             ws.autofilter(0, 0, nrows, ncols - 1)
-        print("[export_excel] Exportado com xlsxwriter.")
 
-    else:  # openpyxl
+        print("[export_excel] Exportado com xlsxwriter.")
+        bio.seek(0)
+        return bio.getvalue()
+
+    else:
         from openpyxl.styles import Font, PatternFill, Alignment
         from openpyxl.utils import get_column_letter
 
-        with pd.ExcelWriter(bytes_io, engine="openpyxl") as writer:
+        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="Dados", index=False)
             ws = writer.sheets["Dados"]
 
-            # Cabeçalho: fundo escuro + fonte branca + negrito
             for cell in ws[1]:
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="111827")
                 cell.alignment = Alignment(horizontal="center", vertical="center")
 
-            # Larguras básicas + wrap e alinhamentos numéricos
             col_widths = {
                 "nome_do_veiculo": 40,
                 "cidade": 16,
@@ -618,15 +619,16 @@ def _write_excel_to_bytesio(df: pd.DataFrame, bytes_io):
             for idx, col in enumerate(df.columns, start=1):
                 letter = get_column_letter(idx)
                 ws.column_dimensions[letter].width = col_widths.get(col, 18)
-                # numéricos à direita
                 if str(col).startswith("visualizacoes_"):
                     for row in ws.iter_rows(min_row=2, min_col=idx, max_col=idx, max_row=ws.max_row):
                         for cell in row:
                             cell.alignment = Alignment(horizontal="right")
 
-            # Congela a linha do cabeçalho
             ws.freeze_panes = "A2"
+
         print("[export_excel] Exportado com openpyxl (fallback).")
+        bio.seek(0)
+        return bio.getvalue()
 
 def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.DataFrame:
     base = load_data()
@@ -637,7 +639,7 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.Data
     ]
     return dff[[c for c in cols_export if c in dff.columns]].copy()
 
-# ---- Excel (formatado; robusto)
+# ---- Excel (BytesIO; robusto)
 @app.callback(
     Output("download_excel", "data"),
     Input("btn-export-excel", "n_clicks"),
@@ -649,7 +651,12 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.Data
 )
 def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
     df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
-    return dcc.send_bytes(lambda b: _write_excel_to_bytesio(df, b), "metricas_de_veiculos.xlsx")
+
+    # usar callable que escreve bytes no buffer (forma mais compatível do dcc.Download)
+    def _writer(b):
+        b.write(_excel_bytes(df))
+
+    return dcc.send_bytes(_writer, "metricas_de_veiculos.xlsx")
 
 # ---- PDF (tabela formatada)
 @app.callback(
@@ -665,7 +672,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
     df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
 
     def _to_pdf(bytes_io):
-        # ReportLab
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib import colors
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -747,7 +753,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
             ("VALIGN",     (0,0), (-1,-1), "TOP"),
             ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.HexColor("#F8FAFC")]),
         ]
-        # Alinha à direita só as colunas numéricas
         numeric_idx = [i for i, k in enumerate(col_keys) if k.startswith("visualizacoes_")]
         for idx in numeric_idx:
             styles_tbl.append(("ALIGN", (idx,1), (idx,-1), "RIGHT"))
