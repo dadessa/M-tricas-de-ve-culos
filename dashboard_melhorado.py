@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.3)
+Métricas de Veículos (v2.4)
 - Lê do Google Sheets via SHEETS_CSV_URL (CSV público) com cache-busting
 - "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, filtros)
 - Resolver robusto p/ colunas de visualizações (Junho/Julho/Agosto)
@@ -8,6 +8,7 @@ Métricas de Veículos (v2.3)
 - Exportar **PDF** (tabela formatada)
 - Tema claro/escuro, barras multicolor, REPROVADO em vermelho
 - Coluna 'motivo' após 'status' na tabela
+Requisitos: pandas dash plotly xlsxwriter openpyxl reportlab
 """
 
 import os
@@ -23,7 +24,7 @@ from dash.dash_table.Format import Format, Group, Scheme
 
 # ========= FONTE DE DADOS =========
 EXCEL_PATH = "Recadastramento (respostas).xlsx"   # fallback local (dev)
-SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")      # defina no Render
+SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")      # defina no Render (CSV público)
 
 def _url_with_cache_bust(url: str) -> str:
     sep = "&" if "?" in url else "?"
@@ -41,9 +42,9 @@ def _normalize(colname: str) -> str:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)
-    s = s.str.replace(",", ".", regex=False)
-    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)                 # mantém dígitos/-,./,
+    s = s.str.replace(",", ".", regex=False)                          # vírgula -> ponto
+    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)  # remove pontos de milhar
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
 def _find_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -232,7 +233,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.3", className="badge"),
+                html.Span("v2.4", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -542,9 +543,8 @@ def _excel_bytes(df: pd.DataFrame) -> bytes:
     """
     engine = _excel_engine_available()
     if engine is None:
-        # Sem engines — avisa no log e devolve CSV para não quebrar o download
         print("[export_excel] Nenhum engine Excel encontrado — instale xlsxwriter/openpyxl.")
-        return df.to_csv(index=False).encode("utf-8")
+        return df.to_csv(index=False).encode("utf-8")  # fallback CSV
 
     bio = BytesIO()
 
@@ -639,7 +639,7 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.Data
     ]
     return dff[[c for c in cols_export if c in dff.columns]].copy()
 
-# ---- Excel (BytesIO; robusto)
+# ---- Excel (BytesIO; retorna bytes diretamente)
 @app.callback(
     Output("download_excel", "data"),
     Input("btn-export-excel", "n_clicks"),
@@ -651,12 +651,23 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.Data
 )
 def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
     df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
+    engine = _excel_engine_available()
 
-    # usar callable que escreve bytes no buffer (forma mais compatível do dcc.Download)
-    def _writer(b):
-        b.write(_excel_bytes(df))
+    if engine is None:
+        # Sem engine: entrega CSV para não quebrar a UX
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        return dcc.send_bytes(
+            csv_bytes,
+            filename="metricas_de_veiculos.csv",
+            mime_type="text/csv"
+        )
 
-    return dcc.send_bytes(_writer, "metricas_de_veiculos.xlsx")
+    xlsx_bytes = _excel_bytes(df)
+    return dcc.send_bytes(
+        xlsx_bytes,
+        filename="metricas_de_veiculos.xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 # ---- PDF (tabela formatada)
 @app.callback(
