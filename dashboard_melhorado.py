@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.0)
+Métricas de Veículos (v2.1)
 - Lê do Google Sheets via SHEETS_CSV_URL (CSV público) com cache-busting
 - "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, filtros)
 - Resolver robusto p/ colunas de visualizações (Junho/Julho/Agosto)
-- Exportar **Excel (formatado)** e **PDF**
+- Exportar **Excel (formatado)** e **PDF** (corrigido)
 - Tema claro/escuro, barras multicolor, REPROVADO em vermelho
 - Coluna 'motivo' após 'status' na tabela
 """
 
 import os
 import time
-import io
 import unicodedata
 import pandas as pd
 import plotly.express as px
 from dash import Dash, dcc, html, dash_table, Input, Output, State
 from dash.dcc import send_data_frame
-from dash.dash_table.Format import Format, Group, Scheme
+
+from dash.dash_table.Format import Format, Group, Scheme  # formatação DataTable
 
 # ========= FONTE DE DADOS =========
 EXCEL_PATH = "Recadastramento (respostas).xlsx"   # fallback local (dev)
@@ -39,8 +39,8 @@ def _normalize(colname: str) -> str:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)   # mantém dígitos, sinais e separadores
-    s = s.str.replace(",", ".", regex=False)            # vírgula -> ponto
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)           # mantém dígitos, sinais e separadores
+    s = s.str.replace(",", ".", regex=False)                    # vírgula -> ponto
     s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)  # remove pontos de milhar
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
@@ -230,7 +230,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.0", className="badge"),
+                html.Span("v2.1", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -584,7 +584,6 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
             ws.add_table(0, 0, nrows, ncols - 1, {
                 "style": "Table Style Medium 9",
                 "columns": [{"header": h} for h in df.columns],
-                # formatos de colunas numéricas mantidos por set_column acima
             })
 
             # Congela cabeçalho e filtro automático
@@ -630,20 +629,26 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
         elements.append(Paragraph("Métricas de Veículos — Dados detalhados", title_style))
         elements.append(Spacer(1, 6))
 
-        # Cabeçalhos
-        headers = [ "Nome do Veículo", "Cidade", "Status", "Motivo", "Categoria",
-                    "Visualizações Junho", "Visualizações Julho", "Visualizações Agosto" ]
-        # Garante que só use colunas presentes
+        # Mapa de rótulos
+        labels = {
+            "nome_do_veiculo": "Nome do Veículo",
+            "cidade": "Cidade",
+            "status": "Status",
+            "motivo": "Motivo",
+            "categoria": "Categoria",
+            "visualizacoes_junho": "Visualizações Junho",
+            "visualizacoes_julho": "Visualizações Julho",
+            "visualizacoes_agosto": "Visualizações Agosto",
+        }
+        # Ordem e filtragem por colunas presentes
         col_keys = ["nome_do_veiculo","cidade","status","motivo","categoria",
                     "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto"]
         col_keys = [c for c in col_keys if c in df.columns]
-        headers   = [h for h, k in zip(headers, ["nome_do_veiculo","cidade","status","motivo","categoria",
-                    "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto"]) if k in col_keys or k in df.columns]
+        headers = [labels[k] for k in col_keys]
 
         # Monta dados (Paragraph para textos longos; números formatados)
-        data = [ [Paragraph(h, header_style)] for h in headers ]
-        # Convert data to horizontal header row
-        data = [ [Paragraph(h, header_style) for h in headers] ]
+        data = []
+        data.append([Paragraph(h, header_style) for h in headers])
 
         def fmt_int(x):
             try:
@@ -677,11 +682,37 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
         col_widths = [ width_map.get(k, 32) * mm for k in col_keys ]
 
         table = Table(data, colWidths=col_widths, repeatRows=1)
-        table.setStyle(TableStyle([
+
+        # Estilos (corrigido)
+        styles_tbl = [
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
             ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
             ("ALIGN",      (0,0), (-1,0), "CENTER"),
             ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
 
             ("GRID",       (0,0), (-1,-1), 0.25, colors.HexColor("#D1D5DB")),
-            ("VALIGN",     (0,0), (-1,-1)
+            ("VALIGN",     (0,0), (-1,-1), "TOP"),
+
+            ("ROWBACKGROUNDS", (0,1), (-1,-1),
+                [colors.whitesmoke, colors.HexColor("#F8FAFC")]),
+        ]
+
+        # Alinhamento à direita para colunas numéricas (views)
+        numeric_idx = [i for i, k in enumerate(col_keys) if k.startswith("visualizacoes_")]
+        for idx in numeric_idx:
+            styles_tbl.append(("ALIGN", (idx,1), (idx,-1), "RIGHT"))
+
+        table.setStyle(TableStyle(styles_tbl))
+
+        elements.append(table)
+        doc.build(elements)
+
+    return dcc.send_bytes(_to_pdf, "metricas_de_veiculos.pdf")
+
+# RUN
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8050))
+    try:
+        app.run(debug=True, host="0.0.0.0", port=port)
+    except AttributeError:
+        app.run_server(debug=True, host="0.0.0.0", port=port)
