@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.5)
+Métricas de Veículos (v2.6)
 - Lê do Google Sheets via SHEETS_CSV_URL (CSV público) com cache-busting
 - "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, filtros)
 - Resolver robusto p/ colunas de visualizações (Junho/Julho/Agosto)
-- Exportar **Excel** (BytesIO) -> dcc.send_bytes com função writer (compatibilidade ampla)
+- Exportar **Excel**: dcc.send_data_frame(df.to_excel, ...) + fallback p/ CSV
 - Exportar **PDF** (tabela formatada)
 - Tema claro/escuro, barras multicolor, REPROVADO em vermelho
 - Coluna 'motivo' após 'status' na tabela
-Requisitos: pandas dash plotly xlsxwriter openpyxl reportlab
 """
 
 import os
@@ -233,7 +232,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.5", className="badge"),
+                html.Span("v2.6", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -525,121 +524,7 @@ def refresh_filter_options(n):
     return cidades, status, cats
 
 # ========= EXPORTS =========
-def _excel_engine_available() -> str | None:
-    try:
-        import xlsxwriter  # noqa: F401
-        return "xlsxwriter"
-    except Exception:
-        try:
-            import openpyxl  # noqa: F401
-            return "openpyxl"
-        except Exception:
-            return None
-
-def _excel_bytes(df: pd.DataFrame) -> bytes:
-    """
-    Gera bytes de um arquivo .xlsx (em memória).
-    Usa xlsxwriter (formatação completa) ou openpyxl (formatação básica).
-    """
-    engine = _excel_engine_available()
-    if engine is None:
-        print("[export_excel] Nenhum engine Excel encontrado — instale xlsxwriter/openpyxl.")
-        return df.to_csv(index=False).encode("utf-8")  # fallback CSV
-
-    bio = BytesIO()
-
-    if engine == "xlsxwriter":
-        with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
-            df.to_excel(writer, sheet_name="Dados", index=False)
-            wb  = writer.book
-            ws  = writer.sheets["Dados"]
-
-            header_fmt = wb.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#111827"})
-            wrap_fmt   = wb.add_format({"text_wrap": True})
-            num_fmt    = wb.add_format({"num_format": "#,##0", "align": "right"})
-
-            ws.set_row(0, 22, header_fmt)
-
-            col_widths = {
-                "nome_do_veiculo": 40,
-                "cidade": 16,
-                "status": 16,
-                "motivo": 50,
-                "categoria": 22,
-                "visualizacoes_junho": 18,
-                "visualizacoes_julho": 18,
-                "visualizacoes_agosto": 18,
-            }
-            for idx, col in enumerate(df.columns):
-                width = col_widths.get(col, 18)
-                if str(col).startswith("visualizacoes_"):
-                    ws.set_column(idx, idx, width, num_fmt)
-                elif col in ["nome_do_veiculo", "motivo", "categoria"]:
-                    ws.set_column(idx, idx, width, wrap_fmt)
-                else:
-                    ws.set_column(idx, idx, width)
-
-            nrows = len(df)
-            ncols = len(df.columns)
-            ws.add_table(0, 0, nrows, ncols - 1, {
-                "style": "Table Style Medium 9",
-                "columns": [{"header": h} for h in df.columns],
-            })
-
-            ws.freeze_panes(1, 0)
-            ws.autofilter(0, 0, nrows, ncols - 1)
-
-        print("[export_excel] Exportado com xlsxwriter.")
-        bio.seek(0)
-        return bio.getvalue()
-
-    else:
-        from openpyxl.styles import Font, PatternFill, Alignment
-        from openpyxl.utils import get_column_letter
-
-        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Dados", index=False)
-            ws = writer.sheets["Dados"]
-
-            for cell in ws[1]:
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor="111827")
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-
-            col_widths = {
-                "nome_do_veiculo": 40,
-                "cidade": 16,
-                "status": 16,
-                "motivo": 50,
-                "categoria": 22,
-                "visualizacoes_junho": 18,
-                "visualizacoes_julho": 18,
-                "visualizacoes_agosto": 18,
-            }
-            for idx, col in enumerate(df.columns, start=1):
-                letter = get_column_letter(idx)
-                ws.column_dimensions[letter].width = col_widths.get(col, 18)
-                if str(col).startswith("visualizacoes_"):
-                    for row in ws.iter_rows(min_row=2, min_col=idx, max_col=idx, max_row=ws.max_row):
-                        for cell in row:
-                            cell.alignment = Alignment(horizontal="right")
-
-            ws.freeze_panes = "A2"
-
-        print("[export_excel] Exportado com openpyxl (fallback).")
-        bio.seek(0)
-        return bio.getvalue()
-
-def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.DataFrame:
-    base = load_data()
-    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
-    cols_export = [
-        "nome_do_veiculo", "cidade", "status", "motivo",
-        "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
-    ]
-    return dff[[c for c in cols_export if c in dff.columns]].copy()
-
-# ---- Excel (BytesIO; writer function p/ máxima compatibilidade)
+# Excel (preferencial) com fallback para CSV se faltar engine
 @app.callback(
     Output("download_excel", "data"),
     Input("btn-export-excel", "n_clicks"),
@@ -651,17 +536,30 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.Data
 )
 def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
     df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
-    engine = _excel_engine_available()
+    # Tenta Excel; se faltar openpyxl/xlsxwriter, cai para CSV.
+    try:
+        return dcc.send_data_frame(
+            df.to_excel,
+            "metricas_de_veiculos.xlsx",
+            sheet_name="Dados",
+            index=False
+        )
+    except Exception as e:
+        print("[export_excel] Falhou to_excel, fallback para CSV:", e)
+        return dcc.send_data_frame(
+            df.to_csv,
+            "metricas_de_veiculos.csv",
+            index=False
+        )
 
-    # função writer para dcc.send_bytes (compatível com Dash mais antigo)
-    def _writer(b):
-        payload = _excel_bytes(df) if engine is not None else df.to_csv(index=False).encode("utf-8")
-        b.write(payload)
-
-    # se não tiver engine, baixará CSV para não quebrar UX (renomeado .csv)
-    if engine is None:
-        return dcc.send_bytes(_writer, "metricas_de_veiculos.csv")
-    return dcc.send_bytes(_writer, "metricas_de_veiculos.xlsx")
+def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.DataFrame:
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
+    cols_export = [
+        "nome_do_veiculo", "cidade", "status", "motivo",
+        "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
+    ]
+    return dff[[c for c in cols_export if c in dff.columns]].copy()
 
 # ---- PDF (tabela formatada)
 @app.callback(
