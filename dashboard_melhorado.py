@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.1)
+Métricas de Veículos (v2.2)
 - Lê do Google Sheets via SHEETS_CSV_URL (CSV público) com cache-busting
 - "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, filtros)
 - Resolver robusto p/ colunas de visualizações (Junho/Julho/Agosto)
-- Exportar **Excel (formatado)** e **PDF** (corrigido)
+- Exportar **Excel (formatado)** com fallback (xlsxwriter -> openpyxl)
+- Exportar **PDF** (tabela formatada)
 - Tema claro/escuro, barras multicolor, REPROVADO em vermelho
 - Coluna 'motivo' após 'status' na tabela
 """
@@ -15,8 +16,6 @@ import unicodedata
 import pandas as pd
 import plotly.express as px
 from dash import Dash, dcc, html, dash_table, Input, Output, State
-from dash.dcc import send_data_frame
-
 from dash.dash_table.Format import Format, Group, Scheme  # formatação DataTable
 
 # ========= FONTE DE DADOS =========
@@ -39,8 +38,8 @@ def _normalize(colname: str) -> str:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)           # mantém dígitos, sinais e separadores
-    s = s.str.replace(",", ".", regex=False)                    # vírgula -> ponto
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)                 # mantém dígitos, sinais e separadores
+    s = s.str.replace(",", ".", regex=False)                          # vírgula -> ponto
     s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)  # remove pontos de milhar
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
@@ -230,7 +229,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.1", className="badge"),
+                html.Span("v2.2", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -522,29 +521,29 @@ def refresh_filter_options(n):
     return cidades, status, cats
 
 # ========= EXPORTS =========
-def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.DataFrame:
-    base = load_data()
-    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
-    cols_export = [
-        "nome_do_veiculo", "cidade", "status", "motivo",
-        "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
-    ]
-    return dff[[c for c in cols_export if c in dff.columns]].copy()
+def _excel_engine_available() -> str | None:
+    try:
+        import xlsxwriter  # noqa: F401
+        return "xlsxwriter"
+    except Exception:
+        try:
+            import openpyxl  # noqa: F401
+            return "openpyxl"
+        except Exception:
+            return None
 
-# ---- Excel (formatado)
-@app.callback(
-    Output("download_excel", "data"),
-    Input("btn-export-excel", "n_clicks"),
-    State("f_cidade", "value"),
-    State("f_status", "value"),
-    State("f_categoria", "value"),
-    State("f_busca", "value"),
-    prevent_initial_call=True
-)
-def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
-    df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
+def _write_excel_to_bytesio(df: pd.DataFrame, bytes_io):
+    """
+    Escreve o DataFrame em bytes_io.
+    Usa xlsxwriter (formatação completa). Se não houver, usa openpyxl (formatação básica).
+    """
+    engine = _excel_engine_available()
+    if engine is None:
+        print("[export_excel] Nenhum engine Excel encontrado — instale xlsxwriter/openpyxl.")
+        bytes_io.write(df.to_csv(index=False).encode("utf-8"))
+        return
 
-    def _to_excel(bytes_io):
+    if engine == "xlsxwriter":
         with pd.ExcelWriter(bytes_io, engine="xlsxwriter") as writer:
             df.to_excel(writer, sheet_name="Dados", index=False)
             wb  = writer.book
@@ -571,7 +570,7 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
             }
             for idx, col in enumerate(df.columns):
                 width = col_widths.get(col, 18)
-                if col.startswith("visualizacoes_"):
+                if str(col).startswith("visualizacoes_"):
                     ws.set_column(idx, idx, width, num_fmt)
                 elif col in ["nome_do_veiculo", "motivo", "categoria"]:
                     ws.set_column(idx, idx, width, wrap_fmt)
@@ -589,8 +588,68 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
             # Congela cabeçalho e filtro automático
             ws.freeze_panes(1, 0)
             ws.autofilter(0, 0, nrows, ncols - 1)
+        print("[export_excel] Exportado com xlsxwriter.")
 
-    return dcc.send_bytes(_to_excel, "metricas_de_veiculos.xlsx")
+    else:  # openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+
+        with pd.ExcelWriter(bytes_io, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="Dados", index=False)
+            ws = writer.sheets["Dados"]
+
+            # Cabeçalho: fundo escuro + fonte branca + negrito
+            for cell in ws[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="111827")
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            # Larguras básicas + wrap e alinhamentos numéricos
+            col_widths = {
+                "nome_do_veiculo": 40,
+                "cidade": 16,
+                "status": 16,
+                "motivo": 50,
+                "categoria": 22,
+                "visualizacoes_junho": 18,
+                "visualizacoes_julho": 18,
+                "visualizacoes_agosto": 18,
+            }
+            for idx, col in enumerate(df.columns, start=1):
+                letter = get_column_letter(idx)
+                ws.column_dimensions[letter].width = col_widths.get(col, 18)
+                # numéricos à direita
+                if str(col).startswith("visualizacoes_"):
+                    for row in ws.iter_rows(min_row=2, min_col=idx, max_col=idx, max_row=ws.max_row):
+                        for cell in row:
+                            cell.alignment = Alignment(horizontal="right")
+
+            # Congela a linha do cabeçalho
+            ws.freeze_panes = "A2"
+        print("[export_excel] Exportado com openpyxl (fallback).")
+
+def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.DataFrame:
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
+    cols_export = [
+        "nome_do_veiculo", "cidade", "status", "motivo",
+        "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
+    ]
+    return dff[[c for c in cols_export if c in dff.columns]].copy()
+
+# ---- Excel (formatado; robusto)
+@app.callback(
+    Output("download_excel", "data"),
+    Input("btn-export-excel", "n_clicks"),
+    State("f_cidade", "value"),
+    State("f_status", "value"),
+    State("f_categoria", "value"),
+    State("f_busca", "value"),
+    prevent_initial_call=True
+)
+def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
+    df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
+    return dcc.send_bytes(lambda b: _write_excel_to_bytesio(df, b), "metricas_de_veiculos.xlsx")
 
 # ---- PDF (tabela formatada)
 @app.callback(
@@ -629,7 +688,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
         elements.append(Paragraph("Métricas de Veículos — Dados detalhados", title_style))
         elements.append(Spacer(1, 6))
 
-        # Mapa de rótulos
         labels = {
             "nome_do_veiculo": "Nome do Veículo",
             "cidade": "Cidade",
@@ -640,13 +698,11 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
             "visualizacoes_julho": "Visualizações Julho",
             "visualizacoes_agosto": "Visualizações Agosto",
         }
-        # Ordem e filtragem por colunas presentes
         col_keys = ["nome_do_veiculo","cidade","status","motivo","categoria",
                     "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto"]
         col_keys = [c for c in col_keys if c in df.columns]
         headers = [labels[k] for k in col_keys]
 
-        # Monta dados (Paragraph para textos longos; números formatados)
         data = []
         data.append([Paragraph(h, header_style) for h in headers])
 
@@ -668,7 +724,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
                     line.append(Paragraph(str(val), cell_text))
             data.append(line)
 
-        # Larguras aproximadas (em mm) -> convertidas para pontos
         width_map = {
             "nome_do_veiculo": 70,
             "cidade": 30,
@@ -683,27 +738,21 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
 
         table = Table(data, colWidths=col_widths, repeatRows=1)
 
-        # Estilos (corrigido)
         styles_tbl = [
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
             ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
             ("ALIGN",      (0,0), (-1,0), "CENTER"),
             ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-
             ("GRID",       (0,0), (-1,-1), 0.25, colors.HexColor("#D1D5DB")),
             ("VALIGN",     (0,0), (-1,-1), "TOP"),
-
-            ("ROWBACKGROUNDS", (0,1), (-1,-1),
-                [colors.whitesmoke, colors.HexColor("#F8FAFC")]),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.HexColor("#F8FAFC")]),
         ]
-
-        # Alinhamento à direita para colunas numéricas (views)
+        # Alinha à direita só as colunas numéricas
         numeric_idx = [i for i, k in enumerate(col_keys) if k.startswith("visualizacoes_")]
         for idx in numeric_idx:
             styles_tbl.append(("ALIGN", (idx,1), (idx,-1), "RIGHT"))
 
         table.setStyle(TableStyle(styles_tbl))
-
         elements.append(table)
         doc.build(elements)
 
