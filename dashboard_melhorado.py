@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.7)
+Métricas de Veículos (v2.8)
+- Dados detalhados: remove 'categoria' e as colunas de views mensais (junho/julho/agosto)
+  e adiciona 'Média Trimestral'
 - Exportar PDF ajustado para caber (gráficos + tabela)
 - Exportar Excel via dcc.send_data_frame (compatível) + fallback CSV
 - Atualizar dados do Google Sheets (CSV público) com cache-busting
@@ -126,6 +128,10 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     df["total_visualizacoes"] = (
         df["visualizacoes_junho"] + df["visualizacoes_julho"] + df["visualizacoes_agosto"]
     )
+    # NOVO: média trimestral (Jun/Jul/Ago)
+    df["media_trimestral"] = (
+        df[["visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto"]].mean(axis=1)
+    )
 
     print("[prepare] Usando views ->",
           "junho:", _resolve_views(df, "junho"),
@@ -153,9 +159,9 @@ def load_data() -> pd.DataFrame:
     except Exception as e:
         print("[load_data] Excel local indisponível e Sheets falhou:", e)
         cols = [
-            "nome_fantasia","nome_do_veiculo","cidade","status","motivo",
-            "categoria","visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto",
-            "total_visualizacoes","url"
+            "nome_fantasia","nome_do_veiculo","cidade","status","motivo","categoria",
+            "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto",
+            "total_visualizacoes","media_trimestral","url"
         ]
         empty = pd.DataFrame(columns=cols)
         return _prepare_df(empty)
@@ -232,7 +238,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.7", className="badge"),
+                html.Span("v2.8", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -336,11 +342,7 @@ app.layout = html.Div(className="light", id="root", children=[
                          "minWidth": "120px", "width": "140px", "maxWidth": "200px"},
                         {"if": {"column_id": "motivo"},
                          "minWidth": "240px", "width": "360px", "maxWidth": "560px"},
-                        {"if": {"column_id": "categoria"},
-                         "minWidth": "160px", "width": "200px", "maxWidth": "260px"},
-                        {"if": {"column_id": "visualizacoes_junho"}, "textAlign": "right"},
-                        {"if": {"column_id": "visualizacoes_julho"}, "textAlign": "right"},
-                        {"if": {"column_id": "visualizacoes_agosto"}, "textAlign": "right"},
+                        {"if": {"column_id": "media_trimestral"}, "textAlign": "right"},
                     ],
                 ),
             ]),
@@ -479,17 +481,14 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
         fig_sites = px.bar(title="Top 10 Sites (Total de Visualizações)")
     style_fig(fig_sites, theme)
 
-    # Tabela
+    # Tabela (AGORA com Média Trimestral e sem categoria/jun/jul/ago)
     cols_order = [
-        "nome_do_veiculo", "cidade", "status", "motivo",
-        "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
+        "nome_do_veiculo", "cidade", "status", "motivo", "media_trimestral"
     ]
     friendly = {
         "nome_do_veiculo": "Nome do Veículo",
-        "cidade": "Cidade", "status": "Status", "motivo": "Motivo", "categoria": "Categoria",
-        "visualizacoes_junho": "Visualizações Junho",
-        "visualizacoes_julho": "Visualizações Julho",
-        "visualizacoes_agosto": "Visualizações Agosto",
+        "cidade": "Cidade", "status": "Status", "motivo": "Motivo",
+        "media_trimestral": "Média Trimestral",
     }
     present = [c for c in cols_order if c in dff.columns]
     fmt_int = Format(group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",",
@@ -497,7 +496,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
     columns = []
     for c in present:
         col_def = {"name": friendly.get(c, c), "id": c}
-        if c.startswith("visualizacoes_"):
+        if c in ["media_trimestral"]:
             col_def.update({"type": "numeric", "format": fmt_int})
         columns.append(col_def)
     data = dff[present].to_dict("records")
@@ -555,8 +554,7 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.Data
     base = load_data()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
     cols_export = [
-        "nome_do_veiculo", "cidade", "status", "motivo",
-        "categoria", "visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto",
+        "nome_do_veiculo", "cidade", "status", "motivo", "media_trimestral"
     ]
     return dff[[c for c in cols_export if c in dff.columns]].copy()
 
@@ -719,7 +717,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
 
             # a cada 2 imagens, fecha a linha
             if (i % 2 == 1) or (i == len(figs)-1):
-                # insere como uma "linha" (usa tabela para manter lado a lado)
                 t = Table([[row_imgs[0]] + ([row_imgs[1]] if len(row_imgs) > 1 else [])],
                           colWidths=[col_w, col_w] if len(row_imgs) > 1 else [col_w])
                 t.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"),
@@ -737,13 +734,9 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
             "cidade": "Cidade",
             "status": "Status",
             "motivo": "Motivo",
-            "categoria": "Categoria",
-            "visualizacoes_junho": "Visualizações Junho",
-            "visualizacoes_julho": "Visualizações Julho",
-            "visualizacoes_agosto": "Visualizações Agosto",
+            "media_trimestral": "Média Trimestral",
         }
-        col_keys = ["nome_do_veiculo","cidade","status","motivo","categoria",
-                    "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto"]
+        col_keys = ["nome_do_veiculo","cidade","status","motivo","media_trimestral"]
         col_keys = [c for c in col_keys if c in dff.columns]
         headers = [labels[k] for k in col_keys]
 
@@ -761,9 +754,9 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
             line = []
             for k in col_keys:
                 val = row[k]
-                if k.startswith("visualizacoes_"):
+                if k in ["media_trimestral"]:
                     line.append(Paragraph(fmt_int(val), cell_text))
-                elif k in ["nome_do_veiculo","motivo","categoria"]:
+                elif k in ["nome_do_veiculo","motivo"]:
                     line.append(Paragraph(str(val), cell_wrap))
                 else:
                     line.append(Paragraph(str(val), cell_text))
@@ -771,14 +764,11 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
 
         # Ajuste proporcional de larguras para caber
         weights = {
-            "nome_do_veiculo": 3.5,
-            "cidade": 1.2,
-            "status": 1.1,
-            "motivo": 3.6,
-            "categoria": 1.8,
-            "visualizacoes_junho": 1.3,
-            "visualizacoes_julho": 1.3,
-            "visualizacoes_agosto": 1.3,
+            "nome_do_veiculo": 3.8,
+            "cidade": 1.3,
+            "status": 1.2,
+            "motivo": 3.8,
+            "media_trimestral": 1.6,
         }
         wlist = [weights.get(k, 1.0) for k in col_keys]
         total_w = sum(wlist)
@@ -801,8 +791,9 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
             ("TOPPADDING", (0,0), (-1,-1), 3),
             ("BOTTOMPADDING", (0,0), (-1,-1), 3),
         ]
-        numeric_idx = [i for i, k in enumerate(col_keys) if k.startswith("visualizacoes_")]
-        for idx in numeric_idx:
+        # alinhar números à direita
+        idx_media = [i for i, k in enumerate(col_keys) if k == "media_trimestral"]
+        for idx in idx_media:
             styles_tbl.append(("ALIGN", (idx,1), (idx,-1), "RIGHT"))
 
         tbl.setStyle(TableStyle(styles_tbl))
