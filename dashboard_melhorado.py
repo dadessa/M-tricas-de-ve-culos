@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.6)
-- Lê do Google Sheets via SHEETS_CSV_URL (CSV público) com cache-busting
-- "Atualizar dados" recarrega tudo (KPIs, gráficos, tabela, filtros)
-- Resolver robusto p/ colunas de visualizações (Junho/Julho/Agosto)
-- Exportar **Excel**: dcc.send_data_frame(df.to_excel, ...) + fallback p/ CSV
-- Exportar **PDF** (tabela formatada)
-- Tema claro/escuro, barras multicolor, REPROVADO em vermelho
-- Coluna 'motivo' após 'status' na tabela
+Métricas de Veículos (v2.7)
+- Exportar PDF ajustado para caber (gráficos + tabela)
+- Exportar Excel via dcc.send_data_frame (compatível) + fallback CSV
+- Atualizar dados do Google Sheets (CSV público) com cache-busting
+- Tema claro/escuro (claro por padrão), barras multicolor, REPROVADO vermelho
+- Coluna 'motivo' na tabela
+Requisitos extras para PDF com gráficos: kaleido
 """
 
 import os
@@ -17,6 +16,7 @@ from io import BytesIO
 
 import pandas as pd
 import plotly.express as px
+import plotly.io as pio
 from dash import Dash, dcc, html, dash_table
 from dash import Input, Output, State
 from dash.dash_table.Format import Format, Group, Scheme
@@ -160,7 +160,7 @@ def load_data() -> pd.DataFrame:
         empty = pd.DataFrame(columns=cols)
         return _prepare_df(empty)
 
-# Base inicial para montar filtros
+# Base inicial p/ filtros
 DF_BASE = load_data()
 
 # ========= TEMA/CORES =========
@@ -232,7 +232,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.6", className="badge"),
+                html.Span("v2.7", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -536,7 +536,6 @@ def refresh_filter_options(n):
 )
 def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
     df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
-    # Tenta Excel; se faltar openpyxl/xlsxwriter, cai para CSV.
     try:
         return dcc.send_data_frame(
             df.to_excel,
@@ -561,7 +560,7 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.Data
     ]
     return dff[[c for c in cols_export if c in dff.columns]].copy()
 
-# ---- PDF (tabela formatada)
+# ---- PDF (gráficos + tabela ajustada à página)
 @app.callback(
     Output("download_pdf", "data"),
     Input("btn-export-pdf", "n_clicks"),
@@ -569,34 +568,170 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.Data
     State("f_status", "value"),
     State("f_categoria", "value"),
     State("f_busca", "value"),
+    State("sort-order", "value"),
+    State("theme-toggle", "value"),
     prevent_initial_call=True
 )
-def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
-    df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
+    # dados filtrados
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
+    ascending = (order == "asc")
+
+    # Gera figuras (para PDF, forçamos tema CLARO para imprimir melhor)
+    pdf_theme = "light"
+
+    # --- Fig Status
+    if "status" in dff and not dff.empty:
+        g1 = dff["status"].astype(str).str.upper().value_counts().reset_index()
+        g1.columns = ["status", "qtd"]
+        g1 = g1.sort_values("qtd", ascending=ascending)
+        fig_status = px.bar(
+            g1, x="status", y="qtd", text="qtd", title="Distribuição por Status",
+            color="status",
+            color_discrete_map={
+                "APROVADO": "#22C55E",
+                "REPROVADO": "#EF4444",
+                "APROVADO PARCIAL": "#F59E0B",
+                "PENDENTE": "#A78BFA",
+                "INSTA": "#06B6D4",
+            },
+        )
+        fig_status.update_traces(textposition="outside")
+        fig_status.update_layout(showlegend=True,
+                                 xaxis=dict(categoryorder="array", categoryarray=g1["status"].tolist()))
+    else:
+        fig_status = px.bar(title="Distribuição por Status")
+    style_fig(fig_status, pdf_theme)
+    fig_status.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    # --- Fig Top Cidades
+    if "cidade" in dff and not dff.empty:
+        base_cid = dff["cidade"].value_counts().reset_index()
+        base_cid.columns = ["cidade", "qtd"]
+        base_cid = base_cid.sort_values("qtd", ascending=False).head(10)
+        base_cid = base_cid.sort_values("qtd", ascending=ascending)
+        seq = get_sequence(pdf_theme, len(base_cid))
+        fig_cidades = px.bar(
+            base_cid, x="cidade", y="qtd", text="qtd", title="Top 10 Cidades",
+            color="cidade", color_discrete_sequence=seq,
+        )
+        fig_cidades.update_traces(textposition="outside")
+        fig_cidades.update_layout(showlegend=False,
+                                  xaxis=dict(categoryorder="array", categoryarray=base_cid["cidade"].tolist()))
+    else:
+        fig_cidades = px.bar(title="Top 10 Cidades")
+    style_fig(fig_cidades, pdf_theme)
+    fig_cidades.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    # --- Fig Meses
+    vj = float(dff["visualizacoes_junho"].sum()) if "visualizacoes_junho" in dff else 0.0
+    vl = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    va = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    g3 = pd.DataFrame({"Mês": ["Junho", "Julho", "Agosto"], "Visualizações": [vj, vl, va]}).sort_values(
+        "Visualizações", ascending=ascending
+    )
+    seq3 = get_sequence(pdf_theme, len(g3))
+    fig_meses = px.bar(
+        g3, x="Mês", y="Visualizações", text="Visualizações",
+        title="Total de Visualizações por Mês",
+        color="Mês", color_discrete_sequence=seq3,
+    )
+    fig_meses.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+    fig_meses.update_layout(showlegend=False,
+                            xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()))
+    style_fig(fig_meses, pdf_theme)
+    fig_meses.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    # --- Fig Top Sites
+    if {"nome_fantasia", "total_visualizacoes"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "total_visualizacoes")[["nome_fantasia", "total_visualizacoes"]]
+        g4 = g4.sort_values("total_visualizacoes", ascending=ascending)
+        seq4 = get_sequence(pdf_theme, len(g4))
+        fig_sites = px.bar(
+            g4, x="total_visualizacoes", y="nome_fantasia", orientation="h",
+            text="total_visualizacoes",
+            title="Top 10 Sites (Total de Visualizações)",
+            color="nome_fantasia", color_discrete_sequence=seq4,
+        )
+        fig_sites.update_traces(texttemplate="%{text:.0f}")
+        fig_sites.update_layout(showlegend=False,
+                                yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()))
+    else:
+        fig_sites = px.bar(title="Top 10 Sites (Total de Visualizações)")
+    style_fig(fig_sites, pdf_theme)
+    fig_sites.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    figs = [fig_status, fig_cidades, fig_meses, fig_sites]
 
     def _to_pdf(bytes_io):
+        # libs do ReportLab
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib import colors
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
         from reportlab.lib.units import mm
+
+        page_size = landscape(A4)
+        left_margin = right_margin = top_margin = bottom_margin = 12 * mm
+        avail_w = page_size[0] - left_margin - right_margin
 
         doc = SimpleDocTemplate(
             bytes_io,
-            pagesize=landscape(A4),
-            leftMargin=12*mm, rightMargin=12*mm, topMargin=12*mm, bottomMargin=12*mm
+            pagesize=page_size,
+            leftMargin=left_margin, rightMargin=right_margin,
+            topMargin=top_margin, bottomMargin=bottom_margin
         )
 
         styles = getSampleStyleSheet()
-        title_style = ParagraphStyle("title", parent=styles["Heading2"], alignment=0, fontSize=14, textColor=colors.HexColor("#111827"))
+        title_style = ParagraphStyle("title", parent=styles["Heading2"],
+                                     alignment=0, fontSize=14, leading=16,
+                                     textColor=colors.HexColor("#111827"))
+
         header_style = ParagraphStyle("header", parent=styles["Normal"], fontSize=9, textColor=colors.white)
         cell_text = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8, leading=10)
         cell_wrap = ParagraphStyle("cell_wrap", parent=cell_text, wordWrap="CJK")
 
-        elements = []
-        elements.append(Paragraph("Métricas de Veículos — Dados detalhados", title_style))
-        elements.append(Spacer(1, 6))
+        story = []
+        story.append(Paragraph("Métricas de Veículos — Relatório", title_style))
+        story.append(Spacer(1, 6))
 
+        # ====== GRÁFICOS (2 por linha) ======
+        def fig_to_rlimage(fig, width_pt):
+            """Converte figure Plotly em RLImage com largura específica."""
+            try:
+                img_bytes = pio.to_image(fig, format="png", scale=2)  # requer kaleido
+                # Ajuste de altura mantendo proporção 16:9 aproximada
+                height_pt = width_pt * 9.0 / 16.0
+                return RLImage(BytesIO(img_bytes), width=width_pt, height=height_pt)
+            except Exception as e:
+                print("[export_pdf] Falha ao renderizar gráfico com kaleido:", e)
+                return None
+
+        col_w = (avail_w - 6*mm) / 2.0  # 6mm de "gutter" entre colunas
+        row_imgs = []
+        for i, fig in enumerate(figs):
+            rlimg = fig_to_rlimage(fig, col_w)
+            if rlimg:
+                row_imgs.append(rlimg)
+            else:
+                row_imgs.append(Paragraph("**Gráfico indisponível (kaleido ausente)**", cell_text))
+
+            # a cada 2 imagens, fecha a linha
+            if (i % 2 == 1) or (i == len(figs)-1):
+                # insere como uma "linha" (usa tabela para manter lado a lado)
+                t = Table([[row_imgs[0]] + ([row_imgs[1]] if len(row_imgs) > 1 else [])],
+                          colWidths=[col_w, col_w] if len(row_imgs) > 1 else [col_w])
+                t.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"),
+                                       ("LEFTPADDING", (0,0), (-1,-1), 0),
+                                       ("RIGHTPADDING", (0,0), (-1,-1), 0),
+                                       ("TOPPADDING", (0,0), (-1,-1), 0),
+                                       ("BOTTOMPADDING", (0,0), (-1,-1), 0)]))
+                story.append(t)
+                story.append(Spacer(1, 8))
+                row_imgs = []
+
+        # ====== TABELA ======
         labels = {
             "nome_do_veiculo": "Nome do Veículo",
             "cidade": "Cidade",
@@ -609,19 +744,20 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
         }
         col_keys = ["nome_do_veiculo","cidade","status","motivo","categoria",
                     "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto"]
-        col_keys = [c for c in col_keys if c in df.columns]
+        col_keys = [c for c in col_keys if c in dff.columns]
         headers = [labels[k] for k in col_keys]
 
-        data = []
-        data.append([Paragraph(h, header_style) for h in headers])
+        # cabeçalho
+        data = [[Paragraph(h, header_style) for h in headers]]
 
+        # função para números
         def fmt_int(x):
             try:
                 return str(f"{int(round(float(x))):,}").replace(",", ".")
             except:
                 return str(x)
 
-        for _, row in df[col_keys].iterrows():
+        for _, row in dff[col_keys].iterrows():
             line = []
             for k in col_keys:
                 val = row[k]
@@ -633,19 +769,24 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
                     line.append(Paragraph(str(val), cell_text))
             data.append(line)
 
-        width_map = {
-            "nome_do_veiculo": 70,
-            "cidade": 30,
-            "status": 26,
-            "motivo": 90,
-            "categoria": 40,
-            "visualizacoes_junho": 32,
-            "visualizacoes_julho": 32,
-            "visualizacoes_agosto": 32,
+        # Ajuste proporcional de larguras para caber
+        weights = {
+            "nome_do_veiculo": 3.5,
+            "cidade": 1.2,
+            "status": 1.1,
+            "motivo": 3.6,
+            "categoria": 1.8,
+            "visualizacoes_junho": 1.3,
+            "visualizacoes_julho": 1.3,
+            "visualizacoes_agosto": 1.3,
         }
-        col_widths = [ width_map.get(k, 32) * mm for k in col_keys ]
+        wlist = [weights.get(k, 1.0) for k in col_keys]
+        total_w = sum(wlist)
+        col_widths = [ (w/total_w) * avail_w for w in wlist ]
 
-        table = Table(data, colWidths=col_widths, repeatRows=1)
+        tbl = Table(data, colWidths=col_widths, repeatRows=1)
+        # Permite quebra por linha para caber em várias páginas
+        tbl.splitByRow = 1
 
         styles_tbl = [
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
@@ -655,14 +796,19 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca):
             ("GRID",       (0,0), (-1,-1), 0.25, colors.HexColor("#D1D5DB")),
             ("VALIGN",     (0,0), (-1,-1), "TOP"),
             ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.HexColor("#F8FAFC")]),
+            ("LEFTPADDING", (0,0), (-1,-1), 4),
+            ("RIGHTPADDING", (0,0), (-1,-1), 4),
+            ("TOPPADDING", (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
         ]
         numeric_idx = [i for i, k in enumerate(col_keys) if k.startswith("visualizacoes_")]
         for idx in numeric_idx:
             styles_tbl.append(("ALIGN", (idx,1), (idx,-1), "RIGHT"))
 
-        table.setStyle(TableStyle(styles_tbl))
-        elements.append(table)
-        doc.build(elements)
+        tbl.setStyle(TableStyle(styles_tbl))
+        story.append(Spacer(1, 4))
+        story.append(tbl)
+        doc.build(story)
 
     return dcc.send_bytes(_to_pdf, "metricas_de_veiculos.pdf")
 
