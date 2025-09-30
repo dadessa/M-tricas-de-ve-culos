@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.9)
+Métricas de Veículos (v3.0)
+- Top 10 Sites agora baseado em 'Média Trimestral' (media_trimestral) — UI e PDF
 - Dados detalhados em lista contínua (sem paginação) com rolagem vertical
 - Dados detalhados: Nome do Veículo, Cidade, Status, Motivo, Média Trimestral
 - Exportar PDF ajustado para caber (gráficos + tabela)
@@ -43,9 +44,9 @@ def _normalize(colname: str) -> str:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)                 # mantém dígitos/-,./,
-    s = s.str.replace(",", ".", regex=False)                          # vírgula -> ponto
-    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)  # remove pontos de milhar
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)
+    s = s.str.replace(",", ".", regex=False)
+    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
 def _find_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -128,7 +129,6 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     df["total_visualizacoes"] = (
         df["visualizacoes_junho"] + df["visualizacoes_julho"] + df["visualizacoes_agosto"]
     )
-    # média trimestral (Jun/Jul/Ago)
     df["media_trimestral"] = (
         df[["visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto"]].mean(axis=1)
     )
@@ -238,7 +238,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.9", className="badge"),
+                html.Span("v3.0", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -314,7 +314,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="card", children=[dcc.Graph(id="g_status", config={"displayModeBar": False})]),
             html.Div(className="card", children=[dcc.Graph(id="g_top_cidades", config={"displayModeBar": False})]),
         ]),
-        html.Div(className="grid-2", children=[
+        html.Div className="grid-2", children=[
             html.Div(className="card", children=[dcc.Graph(id="g_meses", config={"displayModeBar": False})]),
             html.Div(className="card", children=[dcc.Graph(id="g_top_sites", config={"displayModeBar": False})]),
         ]),
@@ -325,17 +325,15 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="card", children=[
                 dash_table.DataTable(
                     id="tbl",
-                    # <<< mudanças principais >>>
-                    page_action="none",                     # desativa paginação (lista contínua)
-                    # page_size removido (não é usado quando page_action="none")
+                    page_action="none",
                     sort_action="native",
                     filter_action="native",
                     fixed_rows={"headers": True},
                     style_table={
                         "overflowX": "auto",
                         "minWidth": "100%",
-                        "maxHeight": "70vh",                 # altura da área da tabela
-                        "overflowY": "auto",                 # rolagem vertical
+                        "maxHeight": "70vh",
+                        "overflowY": "auto",
                     },
                     style_cell={
                         "padding": "10px",
@@ -453,7 +451,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
         fig_cidades = px.bar(title="Top 10 Cidades")
     style_fig(fig_cidades, theme)
 
-    # Visualizações por mês
+    # Visualizações por mês (soma total por mês)
     vj = float(dff["visualizacoes_junho"].sum()) if "visualizacoes_junho" in dff else 0.0
     vl = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
     va = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
@@ -473,27 +471,29 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
     )
     style_fig(fig_meses, theme)
 
-    # Top sites
-    if {"nome_fantasia", "total_visualizacoes"}.issubset(dff.columns) and not dff.empty:
-        g4 = dff.nlargest(10, "total_visualizacoes")[["nome_fantasia", "total_visualizacoes"]]
-        g4 = g4.sort_values("total_visualizacoes", ascending=ascending)
+    # Top sites — AGORA usando média_trimestral
+    if {"nome_fantasia", "media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia", "media_trimestral"]]
+        g4 = g4.sort_values("media_trimestral", ascending=ascending)
         seq4 = get_sequence(theme, len(g4))
         fig_sites = px.bar(
-            g4, x="total_visualizacoes", y="nome_fantasia", orientation="h",
-            text="total_visualizacoes",
-            title="Top 10 Sites (Total de Visualizações)",
+            g4, x="media_trimestral", y="nome_fantasia", orientation="h",
+            text="media_trimestral",
+            title="Top 10 Sites (Média Trimestral)",
             color="nome_fantasia", color_discrete_sequence=seq4,
         )
         fig_sites.update_traces(texttemplate="%{text:.0f}")
         fig_sites.update_layout(
             showlegend=False,
             yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()),
+            xaxis_title="Média Trimestral",
+            yaxis_title="Site",
         )
     else:
-        fig_sites = px.bar(title="Top 10 Sites (Total de Visualizações)")
+        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral)")
     style_fig(fig_sites, theme)
 
-    # Tabela (Média Trimestral, sem categoria/jun/jul/ago) — lista contínua
+    # Tabela (lista contínua)
     cols_order = [
         "nome_do_veiculo", "cidade", "status", "motivo", "media_trimestral"
     ]
@@ -653,29 +653,29 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
     style_fig(fig_meses, pdf_theme)
     fig_meses.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
-    # --- Fig Top Sites
-    if {"nome_fantasia", "total_visualizacoes"}.issubset(dff.columns) and not dff.empty:
-        g4 = dff.nlargest(10, "total_visualizacoes")[["nome_fantasia", "total_visualizacoes"]]
-        g4 = g4.sort_values("total_visualizacoes", ascending=ascending)
+    # --- Top Sites por Média Trimestral (PDF)
+    if {"nome_fantasia", "media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia", "media_trimestral"]]
+        g4 = g4.sort_values("media_trimestral", ascending=ascending)
         seq4 = get_sequence(pdf_theme, len(g4))
         fig_sites = px.bar(
-            g4, x="total_visualizacoes", y="nome_fantasia", orientation="h",
-            text="total_visualizacoes",
-            title="Top 10 Sites (Total de Visualizações)",
+            g4, x="media_trimestral", y="nome_fantasia", orientation="h",
+            text="media_trimestral",
+            title="Top 10 Sites (Média Trimestral)",
             color="nome_fantasia", color_discrete_sequence=seq4,
         )
         fig_sites.update_traces(texttemplate="%{text:.0f}")
         fig_sites.update_layout(showlegend=False,
-                                yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()))
+                                yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()),
+                                xaxis_title="Média Trimestral", yaxis_title="Site")
     else:
-        fig_sites = px.bar(title="Top 10 Sites (Total de Visualizações)")
+        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral)")
     style_fig(fig_sites, pdf_theme)
     fig_sites.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
     figs = [fig_status, fig_cidades, fig_meses, fig_sites]
 
     def _to_pdf(bytes_io):
-        # libs do ReportLab
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib import colors
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -706,19 +706,16 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
         story.append(Paragraph("Métricas de Veículos — Relatório", title_style))
         story.append(Spacer(1, 6))
 
-        # ====== GRÁFICOS (2 por linha) ======
         def fig_to_rlimage(fig, width_pt):
-            """Converte figure Plotly em RLImage com largura específica."""
             try:
                 img_bytes = pio.to_image(fig, format="png", scale=2)  # requer kaleido
-                # Ajuste de altura mantendo proporção 16:9 aproximada
                 height_pt = width_pt * 9.0 / 16.0
                 return RLImage(BytesIO(img_bytes), width=width_pt, height=height_pt)
             except Exception as e:
                 print("[export_pdf] Falha ao renderizar gráfico com kaleido:", e)
                 return None
 
-        col_w = (avail_w - 6*mm) / 2.0  # 6mm de "gutter" entre colunas
+        col_w = (avail_w - 6*mm) / 2.0
         row_imgs = []
         for i, fig in enumerate(figs):
             rlimg = fig_to_rlimage(fig, col_w)
@@ -727,7 +724,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
             else:
                 row_imgs.append(Paragraph("**Gráfico indisponível (kaleido ausente)**", cell_text))
 
-            # a cada 2 imagens, fecha a linha
             if (i % 2 == 1) or (i == len(figs)-1):
                 t = Table([[row_imgs[0]] + ([row_imgs[1]] if len(row_imgs) > 1 else [])],
                           colWidths=[col_w, col_w] if len(row_imgs) > 1 else [col_w])
@@ -752,10 +748,8 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
         col_keys = [c for c in col_keys if c in dff.columns]
         headers = [labels[k] for k in col_keys]
 
-        # cabeçalho
         data = [[Paragraph(h, header_style) for h in headers]]
 
-        # função para números
         def fmt_int(x):
             try:
                 return str(f"{int(round(float(x))):,}").replace(",", ".")
@@ -774,7 +768,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
                     line.append(Paragraph(str(val), cell_text))
             data.append(line)
 
-        # Ajuste proporcional de larguras para caber
         weights = {
             "nome_do_veiculo": 3.8,
             "cidade": 1.3,
@@ -787,7 +780,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
         col_widths = [ (w/total_w) * avail_w for w in wlist ]
 
         tbl = Table(data, colWidths=col_widths, repeatRows=1)
-        # Permite quebra por linha para caber em várias páginas
         tbl.splitByRow = 1
 
         styles_tbl = [
@@ -803,7 +795,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
             ("TOPPADDING", (0,0), (-1,-1), 3),
             ("BOTTOMPADDING", (0,0), (-1,-1), 3),
         ]
-        # alinhar números à direita
         idx_media = [i for i, k in enumerate(col_keys) if k == "media_trimestral"]
         for idx in idx_media:
             styles_tbl.append(("ALIGN", (idx,1), (idx,-1), "RIGHT"))
