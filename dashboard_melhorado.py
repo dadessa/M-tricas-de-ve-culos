@@ -309,3 +309,363 @@ app.layout = html.Div(className="light", id="root", children=[
                     style_cell_conditional=[
                         {"if": {"column_id": "nome_do_veiculo"}, "minWidth":"260px","width":"320px","maxWidth":"520px"},
                         {"if": {"column_id": "cidade"}, "minWidth":"120px","width":"140px","maxWidth":"200px"},
+                        {"if": {"column_id": "status"}, "minWidth":"120px","width":"140px","maxWidth":"200px"},
+                        {"if": {"column_id": "motivo"}, "minWidth":"240px","width":"360px","maxWidth":"560px"},
+                        {"if": {"column_id": "media_trimestral"}, "textAlign":"right"},
+                    ],
+                ),
+            ]),
+        ]),
+    ]),
+])
+
+# ========= CALLBACKS =========
+def _filtrar(base: pd.DataFrame, cidade, status, categoria, termo) -> pd.DataFrame:
+    dff = base.copy()
+    if cidade:   dff = dff[dff["cidade"].isin(cidade)]
+    if status:   dff = dff[dff["status"].isin(status)]
+    if categoria:dff = dff[dff["categoria"].isin(categoria)]
+    if termo and str(termo).strip():
+        alvo = "nome_fantasia" if "nome_fantasia" in dff.columns else ("nome_do_veiculo" if "nome_do_veiculo" in dff.columns else dff.columns[0])
+        dff = dff[dff[alvo].astype(str).str.contains(str(termo), case=False, na=False)]
+    return dff
+
+@app.callback(Output("root", "className"), Input("theme-toggle", "value"))
+def set_theme(theme): return "light" if theme == "light" else "dark"
+
+# Atualiza KPI/Gráficos/Tabela
+@app.callback(
+    Output("kpi_total", "children"),
+    Output("kpi_aprov", "children"),
+    Output("kpi_reprov", "children"),
+    Output("kpi_cidades", "children"),
+    Output("g_status", "figure"),
+    Output("g_top_cidades", "figure"),
+    Output("g_meses", "figure"),
+    Output("g_top_sites", "figure"),
+    Output("tbl", "data"),
+    Output("tbl", "columns"),
+    Input("f_cidade", "value"),
+    Input("f_status", "value"),
+    Input("f_categoria", "value"),
+    Input("f_busca", "value"),
+    Input("sort-order", "value"),
+    Input("btn-reload", "n_clicks"),
+    State("theme-toggle", "value"),
+)
+def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
+    base = load_data() if (n_reload and n_reload > 0) else DF_BASE
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
+    ascending = (order == "asc")
+
+    total = int(len(dff))
+    aprov = int((dff["status"] == "APROVADO").sum()) if "status" in dff else 0
+    reprov = int((dff["status"] == "REPROVADO").sum()) if "status" in dff else 0
+    cidades_qtd = int(dff["cidade"].nunique()) if "cidade" in dff else 0
+
+    # Status
+    if "status" in dff and not dff.empty:
+        g1 = dff["status"].astype(str).str.upper().value_counts().reset_index()
+        g1.columns = ["status", "qtd"]
+        g1 = g1.sort_values("qtd", ascending=ascending)
+        fig_status = px.bar(
+            g1, x="status", y="qtd", text="qtd", title="Distribuição por Status",
+            color="status",
+            color_discrete_map={
+                "APROVADO": "#22C55E","REPROVADO": "#EF4444",
+                "APROVADO PARCIAL": "#F59E0B","PENDENTE": "#A78BFA","INSTA":"#06B6D4",
+            },
+        )
+        fig_status.update_traces(textposition="outside")
+        fig_status.update_layout(showlegend=True,
+                                 xaxis=dict(categoryorder="array", categoryarray=g1["status"].tolist()))
+    else:
+        fig_status = px.bar(title="Distribuição por Status")
+    style_fig(fig_status, theme)
+
+    # Top cidades
+    if "cidade" in dff and not dff.empty:
+        base_cid = dff["cidade"].value_counts().reset_index()
+        base_cid.columns = ["cidade", "qtd"]
+        base_cid = base_cid.sort_values("qtd", ascending=False).head(10)
+        base_cid = base_cid.sort_values("qtd", ascending=ascending)
+        seq = get_sequence(theme, len(base_cid))
+        fig_cidades = px.bar(
+            base_cid, x="cidade", y="qtd", text="qtd", title="Top 10 Cidades",
+            color="cidade", color_discrete_sequence=seq,
+        )
+        fig_cidades.update_traces(textposition="outside")
+        fig_cidades.update_layout(showlegend=False,
+                                  xaxis=dict(categoryorder="array", categoryarray=base_cid["cidade"].tolist()))
+    else:
+        fig_cidades = px.bar(title="Top 10 Cidades")
+    style_fig(fig_cidades, theme)
+
+    # Visualizações por mês (soma)
+    vj = float(dff["visualizacoes_junho"].sum()) if "visualizacoes_junho" in dff else 0.0
+    vl = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    va = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    g3 = pd.DataFrame({"Mês": ["Junho","Julho","Agosto"], "Visualizações": [vj,vl,va]}).sort_values(
+        "Visualizações", ascending=ascending)
+    seq3 = get_sequence(theme, len(g3))
+    fig_meses = px.bar(
+        g3, x="Mês", y="Visualizações", text="Visualizações",
+        title="Total de Visualizações por Mês",
+        color="Mês", color_discrete_sequence=seq3,
+    )
+    fig_meses.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+    fig_meses.update_layout(showlegend=False,
+                            xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()))
+    style_fig(fig_meses, theme)
+
+    # Top sites — média_trimestral
+    if {"nome_fantasia","media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia","media_trimestral"]]
+        g4 = g4.sort_values("media_trimestral", ascending=ascending)
+        seq4 = get_sequence(theme, len(g4))
+        fig_sites = px.bar(
+            g4, x="media_trimestral", y="nome_fantasia", orientation="h",
+            text="media_trimestral",
+            title="Top 10 Sites (Média Trimestral)",
+            color="nome_fantasia", color_discrete_sequence=seq4,
+        )
+        fig_sites.update_traces(
+            texttemplate="%{text:.0f}",
+            hovertemplate="%{y}<br>Média trimestral: %{x:.0f}<extra></extra>"
+        )
+        fig_sites.update_layout(
+            showlegend=False,
+            yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()),
+            xaxis_title="Média Trimestral", yaxis_title="Site",
+        )
+    else:
+        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral)")
+    style_fig(fig_sites, theme)
+
+    # Tabela
+    cols_order = ["nome_do_veiculo","cidade","status","motivo","media_trimestral"]
+    friendly = {"nome_do_veiculo":"Nome do Veículo","cidade":"Cidade","status":"Status","motivo":"Motivo","media_trimestral":"Média Trimestral"}
+    present = [c for c in cols_order if c in dff.columns]
+    fmt_int = Format(group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",", precision=0, scheme=Scheme.fixed)
+    columns = []
+    for c in present:
+        col_def = {"name": friendly.get(c, c), "id": c}
+        if c == "media_trimestral":
+            col_def.update({"type":"numeric","format":fmt_int})
+        columns.append(col_def)
+    data = dff[present].to_dict("records")
+
+    return (f"{total}", f"{aprov}", f"{reprov}", f"{cidades_qtd}",
+            fig_status, fig_cidades, fig_meses, fig_sites, data, columns)
+
+# Atualiza opções dos filtros ao clicar em "Atualizar dados"
+@app.callback(
+    Output("f_cidade", "options"),
+    Output("f_status", "options"),
+    Output("f_categoria", "options"),
+    Input("btn-reload", "n_clicks"),
+    prevent_initial_call=True
+)
+def refresh_filter_options(n):
+    d = load_data()
+    cidades = [{"label": c, "value": c} for c in sorted(d["cidade"].dropna().unique())] if "cidade" in d else []
+    status  = [{"label": s, "value": s} for s in sorted(d["status"].dropna().unique())] if "status" in d else []
+    cats    = [{"label": c, "value": c} for c in sorted(d["categoria"].dropna().unique())] if "categoria" in d else []
+    return cidades, status, cats
+
+# ========= EXPORTS =========
+@app.callback(
+    Output("download_excel", "data"),
+    Input("btn-export-excel", "n_clicks"),
+    State("f_cidade", "value"),
+    State("f_status", "value"),
+    State("f_categoria", "value"),
+    State("f_busca", "value"),
+    prevent_initial_call=True
+)
+def exportar_excel(n, f_cidade, f_status, f_categoria, f_busca):
+    df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca)
+    try:
+        return dcc.send_data_frame(df.to_excel, "metricas_de_veiculos.xlsx", sheet_name="Dados", index=False)
+    except Exception as e:
+        print("[export_excel] Falhou to_excel, fallback para CSV:", e)
+        return dcc.send_data_frame(df.to_csv, "metricas_de_veiculos.csv", index=False)
+
+def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_busca) -> pd.DataFrame:
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
+    cols_export = ["nome_do_veiculo","cidade","status","motivo","media_trimestral"]
+    return dff[[c for c in cols_export if c in dff.columns]].copy()
+
+# ---- PDF
+@app.callback(
+    Output("download_pdf", "data"),
+    Input("btn-export-pdf", "n_clicks"),
+    State("f_cidade", "value"),
+    State("f_status", "value"),
+    State("f_categoria", "value"),
+    State("f_busca", "value"),
+    State("sort-order", "value"),
+    State("theme-toggle", "value"),
+    prevent_initial_call=True
+)
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_busca)
+    ascending = (order == "asc")
+    pdf_theme = "light"
+
+    # Status
+    if "status" in dff and not dff.empty:
+        g1 = dff["status"].astype(str).str.upper().value_counts().reset_index()
+        g1.columns = ["status", "qtd"]
+        g1 = g1.sort_values("qtd", ascending=ascending)
+        fig_status = px.bar(g1, x="status", y="qtd", text="qtd", title="Distribuição por Status", color="status",
+                            color_discrete_map={"APROVADO":"#22C55E","REPROVADO":"#EF4444","APROVADO PARCIAL":"#F59E0B","PENDENTE":"#A78BFA","INSTA":"#06B6D4"})
+        fig_status.update_traces(textposition="outside")
+        fig_status.update_layout(showlegend=True, xaxis=dict(categoryorder="array", categoryarray=g1["status"].tolist()))
+    else:
+        fig_status = px.bar(title="Distribuição por Status")
+    style_fig(fig_status, pdf_theme); fig_status.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    # Top Cidades
+    if "cidade" in dff and not dff.empty:
+        base_cid = dff["cidade"].value_counts().reset_index()
+        base_cid.columns = ["cidade","qtd"]
+        base_cid = base_cid.sort_values("qtd", ascending=False).head(10)
+        base_cid = base_cid.sort_values("qtd", ascending=ascending)
+        seq = get_sequence(pdf_theme, len(base_cid))
+        fig_cidades = px.bar(base_cid, x="cidade", y="qtd", text="qtd", title="Top 10 Cidades", color="cidade", color_discrete_sequence=seq)
+        fig_cidades.update_traces(textposition="outside")
+        fig_cidades.update_layout(showlegend=False, xaxis=dict(categoryorder="array", categoryarray=base_cid["cidade"].tolist()))
+    else:
+        fig_cidades = px.bar(title="Top 10 Cidades")
+    style_fig(fig_cidades, pdf_theme); fig_cidades.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    # Meses
+    vj = float(dff["visualizacoes_junho"].sum()) if "visualizacoes_junho" in dff else 0.0
+    vl = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    va = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    g3 = pd.DataFrame({"Mês":["Junho","Julho","Agosto"], "Visualizações":[vj,vl,va]}).sort_values("Visualizações", ascending=ascending)
+    seq3 = get_sequence(pdf_theme, len(g3))
+    fig_meses = px.bar(g3, x="Mês", y="Visualizações", text="Visualizações", title="Total de Visualizações por Mês",
+                       color="Mês", color_discrete_sequence=seq3)
+    fig_meses.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+    fig_meses.update_layout(showlegend=False, xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()))
+    style_fig(fig_meses, pdf_theme); fig_meses.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    # Top Sites por Média
+    if {"nome_fantasia","media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia","media_trimestral"]]
+        g4 = g4.sort_values("media_trimestral", ascending=ascending)
+        seq4 = get_sequence(pdf_theme, len(g4))
+        fig_sites = px.bar(g4, x="media_trimestral", y="nome_fantasia", orientation="h", text="media_trimestral",
+                           title="Top 10 Sites (Média Trimestral)", color="nome_fantasia", color_discrete_sequence=seq4)
+        fig_sites.update_traces(texttemplate="%{text:.0f}")
+        fig_sites.update_layout(showlegend=False, yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()),
+                                xaxis_title="Média Trimestral", yaxis_title="Site")
+    else:
+        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral)")
+    style_fig(fig_sites, pdf_theme); fig_sites.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    figs = [fig_status, fig_cidades, fig_meses, fig_sites]
+
+    def _to_pdf(bytes_io):
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
+        from reportlab.lib.units import mm
+
+        page_size = landscape(A4)
+        left_margin = right_margin = top_margin = bottom_margin = 12 * mm
+        avail_w = page_size[0] - left_margin - right_margin
+
+        doc = SimpleDocTemplate(bytes_io, pagesize=page_size,
+                                leftMargin=left_margin, rightMargin=right_margin,
+                                topMargin=top_margin, bottomMargin=bottom_margin)
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("title", parent=styles["Heading2"], alignment=0, fontSize=14, leading=16, textColor=colors.HexColor("#111827"))
+        header_style = ParagraphStyle("header", parent=styles["Normal"], fontSize=9, textColor=colors.white)
+        cell_text = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8, leading=10)
+        cell_wrap = ParagraphStyle("cell_wrap", parent=cell_text, wordWrap="CJK")
+
+        story = [Paragraph("Métricas de Veículos — Relatório", title_style), Spacer(1, 6)]
+
+        def fig_to_rlimage(fig, width_pt):
+            try:
+                img_bytes = pio.to_image(fig, format="png", scale=2)  # requer kaleido
+                height_pt = width_pt * 9.0 / 16.0
+                return RLImage(BytesIO(img_bytes), width=width_pt, height=height_pt)
+            except Exception as e:
+                print("[export_pdf] Falha ao renderizar gráfico com kaleido:", e)
+                return None
+
+        col_w = (avail_w - 6*mm) / 2.0
+        row_imgs = []
+        for i, fig in enumerate(figs):
+            rlimg = fig_to_rlimage(fig, col_w)
+            row_imgs.append(rlimg or Paragraph("**Gráfico indisponível (kaleido ausente)**", cell_text))
+            if (i % 2 == 1) or (i == len(figs)-1):
+                t = Table([[row_imgs[0]] + ([row_imgs[1]] if len(row_imgs) > 1 else [])],
+                          colWidths=[col_w, col_w] if len(row_imgs) > 1 else [col_w])
+                t.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),
+                                       ("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),
+                                       ("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+                story += [t, Spacer(1, 8)]
+                row_imgs = []
+
+        labels = {"nome_do_veiculo":"Nome do Veículo","cidade":"Cidade","status":"Status","motivo":"Motivo","media_trimestral":"Média Trimestral"}
+        col_keys = [c for c in ["nome_do_veiculo","cidade","status","motivo","media_trimestral"] if c in dff.columns]
+        headers = [labels[k] for k in col_keys]
+        data = [[Paragraph(h, header_style) for h in headers]]
+
+        def fmt_int(x):
+            try: return str(f"{int(round(float(x))):,}").replace(",", ".")
+            except: return str(x)
+
+        for _, row in dff[col_keys].iterrows():
+            line = []
+            for k in col_keys:
+                v = row[k]
+                if k == "media_trimestral":
+                    line.append(Paragraph(fmt_int(v), cell_text))
+                elif k in ["nome_do_veiculo","motivo"]:
+                    line.append(Paragraph(str(v), cell_wrap))
+                else:
+                    line.append(Paragraph(str(v), cell_text))
+            data.append(line)
+
+        weights = {"nome_do_veiculo":3.8,"cidade":1.3,"status":1.2,"motivo":3.8,"media_trimestral":1.6}
+        wlist = [weights.get(k,1.0) for k in col_keys]
+        col_widths = [(w/sum(wlist))*avail_w for w in wlist]
+
+        tbl = Table(data, colWidths=col_widths, repeatRows=1); tbl.splitByRow = 1
+        styles_tbl = [
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("ALIGN",(0,0),(-1,0),"CENTER"),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("GRID",(0,0),(-1,-1),0.25,colors.HexColor("#D1D5DB")),
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke, colors.HexColor("#F8FAFC")]),
+            ("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),
+            ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
+        ]
+        idx_media = [i for i,k in enumerate(col_keys) if k=="media_trimestral"]
+        for idx in idx_media:
+            styles_tbl.append(("ALIGN",(idx,1),(idx,-1),"RIGHT"))
+        tbl.setStyle(TableStyle(styles_tbl))
+        story += [Spacer(1,4), tbl]
+        doc.build(story)
+
+    return dcc.send_bytes(_to_pdf, "metricas_de_veiculos.pdf")
+
+# RUN
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8050))
+    try:
+        app.run(debug=True, host="0.0.0.0", port=port)
+    except AttributeError:
+        app.run_server(debug=True, host="0.0.0.0", port=port)
