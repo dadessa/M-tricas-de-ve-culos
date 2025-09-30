@@ -471,29 +471,27 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
     )
     style_fig(fig_meses, theme)
 
-   # Top sites — usando média_trimestral
-if {"nome_fantasia", "media_trimestral"}.issubset(dff.columns) and not dff.empty:
-    g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia", "media_trimestral"]]
-    g4 = g4.sort_values("media_trimestral", ascending=ascending)
-    seq4 = get_sequence(theme, len(g4))
-    fig_sites = px.bar(
-        g4, x="media_trimestral", y="nome_fantasia", orientation="h",
-        text="media_trimestral",
-        title="Top 10 Sites (Média Trimestral)",
-        color="nome_fantasia", color_discrete_sequence=seq4,
-    )
-    fig_sites.update_traces(
-        texttemplate="%{text:.0f}",
-        hovertemplate="%{y}<br>Média trimestral: %{x:.0f}<extra></extra>"
-    )
-    fig_sites.update_layout(
-        showlegend=False,
-        yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()),
-        xaxis_title="Média Trimestral", yaxis_title="Site",
-    )
-else:
-    fig_sites = px.bar(title="Top 10 Sites (Média Trimestral)")
-style_fig(fig_sites, theme)
+    # Top sites — AGORA usando média_trimestral
+    if {"nome_fantasia", "media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia", "media_trimestral"]]
+        g4 = g4.sort_values("media_trimestral", ascending=ascending)
+        seq4 = get_sequence(theme, len(g4))
+        fig_sites = px.bar(
+            g4, x="media_trimestral", y="nome_fantasia", orientation="h",
+            text="media_trimestral",
+            title="Top 10 Sites (Média Trimestral)",
+            color="nome_fantasia", color_discrete_sequence=seq4,
+        )
+        fig_sites.update_traces(texttemplate="%{text:.0f}")
+        fig_sites.update_layout(
+            showlegend=False,
+            yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()),
+            xaxis_title="Média Trimestral",
+            yaxis_title="Site",
+        )
+    else:
+        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral)")
+    style_fig(fig_sites, theme)
 
     # Tabela (lista contínua)
     cols_order = [
