@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v2.8)
-- Dados detalhados: remove 'categoria' e as colunas de views mensais (junho/julho/agosto)
-  e adiciona 'Média Trimestral'
+Métricas de Veículos (v2.9)
+- Dados detalhados em lista contínua (sem paginação) com rolagem vertical
+- Dados detalhados: Nome do Veículo, Cidade, Status, Motivo, Média Trimestral
 - Exportar PDF ajustado para caber (gráficos + tabela)
 - Exportar Excel via dcc.send_data_frame (compatível) + fallback CSV
 - Atualizar dados do Google Sheets (CSV público) com cache-busting
@@ -128,7 +128,7 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     df["total_visualizacoes"] = (
         df["visualizacoes_junho"] + df["visualizacoes_julho"] + df["visualizacoes_agosto"]
     )
-    # NOVO: média trimestral (Jun/Jul/Ago)
+    # média trimestral (Jun/Jul/Ago)
     df["media_trimestral"] = (
         df[["visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto"]].mean(axis=1)
     )
@@ -238,7 +238,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v2.8", className="badge"),
+                html.Span("v2.9", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -319,18 +319,30 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="card", children=[dcc.Graph(id="g_top_sites", config={"displayModeBar": False})]),
         ]),
 
-        # Tabela
+        # Tabela (lista contínua com rolagem, sem paginação)
         html.Div(className="panel", children=[
             html.Div("Dados detalhados", className="label"),
             html.Div(className="card", children=[
                 dash_table.DataTable(
                     id="tbl",
-                    page_size=12, sort_action="native", filter_action="native",
+                    # <<< mudanças principais >>>
+                    page_action="none",                     # desativa paginação (lista contínua)
+                    # page_size removido (não é usado quando page_action="none")
+                    sort_action="native",
+                    filter_action="native",
                     fixed_rows={"headers": True},
-                    style_table={"overflowX": "auto", "minWidth": "100%"},
+                    style_table={
+                        "overflowX": "auto",
+                        "minWidth": "100%",
+                        "maxHeight": "70vh",                 # altura da área da tabela
+                        "overflowY": "auto",                 # rolagem vertical
+                    },
                     style_cell={
-                        "padding": "10px", "textAlign": "left", "border": "0",
-                        "whiteSpace": "normal", "height": "auto",
+                        "padding": "10px",
+                        "textAlign": "left",
+                        "border": "0",
+                        "whiteSpace": "normal",
+                        "height": "auto",
                     },
                     style_header={"fontWeight": "700", "border": "0"},
                     style_cell_conditional=[
@@ -481,7 +493,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
         fig_sites = px.bar(title="Top 10 Sites (Total de Visualizações)")
     style_fig(fig_sites, theme)
 
-    # Tabela (AGORA com Média Trimestral e sem categoria/jun/jul/ago)
+    # Tabela (Média Trimestral, sem categoria/jun/jul/ago) — lista contínua
     cols_order = [
         "nome_do_veiculo", "cidade", "status", "motivo", "media_trimestral"
     ]
