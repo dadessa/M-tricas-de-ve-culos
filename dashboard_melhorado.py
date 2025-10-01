@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v3.1)
-- Correção de sintaxe (html.Div(...)) que causava 'closing parenthesis does not match opening bracket'
+Métricas de Veículos (v3.2)
+- Top Visualizações do Mês agora usa JULHO, AGOSTO e SETEMBRO
+- Detecção de colunas flexível: aceita "visualizações", "views", "pageviews" etc.
+- Média Trimestral recalculada (jul/ago/set)
 - Top 10 Sites baseado em 'Média Trimestral'
 - Dados detalhados contínuos (sem paginação)
 - Exportar PDF (gráficos + tabela) e Excel/CSV
@@ -39,9 +41,9 @@ def _normalize(colname: str) -> str:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)
-    s = s.str.replace(",", ".", regex=False)
-    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)                 # mantém dígitos/-,./,
+    s = s.str.replace(",", ".", regex=False)                          # vírgula -> ponto
+    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)  # remove pontos de milhar
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
 def _find_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -57,6 +59,10 @@ def _find_by_tokens(df: pd.DataFrame, tokens: list[str]) -> str | None:
     return None
 
 def _resolve_views(df: pd.DataFrame, mes: str) -> str | None:
+    """
+    Tenta resolver a coluna de views para o mês informado.
+    Aceita variações como 'visualizacoes_julho', 'views agosto', 'page_views_setembro', etc.
+    """
     base_aliases = ["visualizacoes", "vizualizacoes", "views", "pageviews", "page_views", "pageview"]
     aliases = [f"visualizacoes_{mes}", f"vizualizacoes_{mes}",
                f"total_de_visualizacoes_{mes}", f"total_de_vizualizacoes_{mes}"]
@@ -64,11 +70,19 @@ def _resolve_views(df: pd.DataFrame, mes: str) -> str | None:
         aliases += [f"{a}_{mes}", f"{a}_de_{mes}", f"{a}__{mes}", f"{mes}_{a}"]
     hit = _find_first(df, aliases)
     if hit: return hit
+
+    # Busca por tokens
     for a in base_aliases:
         hit = _find_by_tokens(df, [a, mes])
         if hit: return hit
-    abrevs = {"junho": ["jun"], "julho": ["jul"], "agosto": ["ago"]}[mes]
-    for ab in abrevs:
+
+    # Abreviações
+    abrevs_map = {
+        "julho": ["jul"],
+        "agosto": ["ago"],
+        "setembro": ["set", "sep"],
+    }
+    for ab in abrevs_map.get(mes, []):
         for a in base_aliases:
             hit = _find_by_tokens(df, [a, ab])
             if hit: return hit
@@ -112,8 +126,8 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         df["motivo"] = ""
     df["motivo"] = df["motivo"].fillna("").astype(str).str.strip()
 
-    # Views por mês
-    for mes in ["junho", "julho", "agosto"]:
+    # Visualizações por mês (JUL/AGO/SET)
+    for mes in ["julho", "agosto", "setembro"]:
         col = _resolve_views(df, mes)
         if col:
             df[f"visualizacoes_{mes}"] = clean_numeric(df[col])
@@ -121,12 +135,19 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
             print(f"[prepare] NÃO encontrei coluna de visualizações de {mes.upper()} nas colunas originais:", original_cols)
             df[f"visualizacoes_{mes}"] = 0.0
 
+    # Totais e média trimestral (jul/ago/set)
     df["total_visualizacoes"] = (
-        df["visualizacoes_junho"] + df["visualizacoes_julho"] + df["visualizacoes_agosto"]
+        df.get("visualizacoes_julho", 0.0) + df.get("visualizacoes_agosto", 0.0) + df.get("visualizacoes_setembro", 0.0)
     )
-    df["media_trimestral"] = (
-        df[["visualizacoes_junho", "visualizacoes_julho", "visualizacoes_agosto"]].mean(axis=1)
-    )
+    df["media_trimestral"] = df[["visualizacoes_julho", "visualizacoes_agosto", "visualizacoes_setembro"]].mean(axis=1)
+
+    print("[prepare] Usando views ->",
+          "julho:", _resolve_views(df, "julho"),
+          "| agosto:", _resolve_views(df, "agosto"),
+          "| setembro:", _resolve_views(df, "setembro"))
+    print("[prepare] Somas -> jul:", df["visualizacoes_julho"].sum(),
+          "ago:", df["visualizacoes_agosto"].sum(),
+          "set:", df["visualizacoes_setembro"].sum())
 
     return df
 
@@ -147,7 +168,7 @@ def load_data() -> pd.DataFrame:
         print("[load_data] Excel local indisponível e Sheets falhou:", e)
         cols = [
             "nome_fantasia","nome_do_veiculo","cidade","status","motivo","categoria",
-            "visualizacoes_junho","visualizacoes_julho","visualizacoes_agosto",
+            "visualizacoes_julho","visualizacoes_agosto","visualizacoes_setembro",
             "total_visualizacoes","media_trimestral","url"
         ]
         empty = pd.DataFrame(columns=cols)
@@ -213,7 +234,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v3.1", className="badge"),
+                html.Span("v3.2", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -287,7 +308,6 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="card", children=[dcc.Graph(id="g_status", config={"displayModeBar": False})]),
             html.Div(className="card", children=[dcc.Graph(id="g_top_cidades", config={"displayModeBar": False})]),
         ]),
-        # <<< LINHA CORRIGIDA AQUI >>>
         html.Div(className="grid-2", children=[
             html.Div(className="card", children=[dcc.Graph(id="g_meses", config={"displayModeBar": False})]),
             html.Div(className="card", children=[dcc.Graph(id="g_top_sites", config={"displayModeBar": False})]),
@@ -326,7 +346,9 @@ def _filtrar(base: pd.DataFrame, cidade, status, categoria, termo) -> pd.DataFra
     if status:   dff = dff[dff["status"].isin(status)]
     if categoria:dff = dff[dff["categoria"].isin(categoria)]
     if termo and str(termo).strip():
-        alvo = "nome_fantasia" if "nome_fantasia" in dff.columns else ("nome_do_veiculo" if "nome_do_veiculo" in dff.columns else dff.columns[0])
+        alvo = "nome_fantasia" if "nome_fantasia" in dff.columns else (
+            "nome_do_veiculo" if "nome_do_veiculo" in dff.columns else dff.columns[0]
+        )
         dff = dff[dff[alvo].astype(str).str.contains(str(termo), case=False, na=False)]
     return dff
 
@@ -372,13 +394,18 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
             g1, x="status", y="qtd", text="qtd", title="Distribuição por Status",
             color="status",
             color_discrete_map={
-                "APROVADO": "#22C55E","REPROVADO": "#EF4444",
-                "APROVADO PARCIAL": "#F59E0B","PENDENTE": "#A78BFA","INSTA":"#06B6D4",
+                "APROVADO": "#22C55E",
+                "REPROVADO": "#EF4444",
+                "APROVADO PARCIAL": "#F59E0B",
+                "PENDENTE": "#A78BFA",
+                "INSTA": "#06B6D4",
             },
         )
         fig_status.update_traces(textposition="outside")
-        fig_status.update_layout(showlegend=True,
-                                 xaxis=dict(categoryorder="array", categoryarray=g1["status"].tolist()))
+        fig_status.update_layout(
+            showlegend=True,
+            xaxis=dict(categoryorder="array", categoryarray=g1["status"].tolist()),
+        )
     else:
         fig_status = px.bar(title="Distribuição por Status")
     style_fig(fig_status, theme)
@@ -395,38 +422,43 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
             color="cidade", color_discrete_sequence=seq,
         )
         fig_cidades.update_traces(textposition="outside")
-        fig_cidades.update_layout(showlegend=False,
-                                  xaxis=dict(categoryorder="array", categoryarray=base_cid["cidade"].tolist()))
+        fig_cidades.update_layout(
+            showlegend=False,
+            xaxis=dict(categoryorder="array", categoryarray=base_cid["cidade"].tolist()),
+        )
     else:
         fig_cidades = px.bar(title="Top 10 Cidades")
     style_fig(fig_cidades, theme)
 
-    # Visualizações por mês (soma)
-    vj = float(dff["visualizacoes_junho"].sum()) if "visualizacoes_junho" in dff else 0.0
-    vl = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
-    va = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
-    g3 = pd.DataFrame({"Mês": ["Junho","Julho","Agosto"], "Visualizações": [vj,vl,va]}).sort_values(
-        "Visualizações", ascending=ascending)
+    # Visualizações por mês (JUL, AGO, SET)
+    vjul = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    vago = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    vset = float(dff["visualizacoes_setembro"].sum()) if "visualizacoes_setembro" in dff else 0.0
+    g3 = pd.DataFrame({"Mês": ["Julho", "Agosto", "Setembro"], "Visualizações": [vjul, vago, vset]}).sort_values(
+        "Visualizações", ascending=ascending
+    )
     seq3 = get_sequence(theme, len(g3))
     fig_meses = px.bar(
         g3, x="Mês", y="Visualizações", text="Visualizações",
-        title="Total de Visualizações por Mês",
+        title="Total de Visualizações por Mês (Jul/Ago/Set)",
         color="Mês", color_discrete_sequence=seq3,
     )
     fig_meses.update_traces(texttemplate="%{text:.0f}", textposition="outside")
-    fig_meses.update_layout(showlegend=False,
-                            xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()))
+    fig_meses.update_layout(
+        showlegend=False,
+        xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()),
+    )
     style_fig(fig_meses, theme)
 
-    # Top sites — média_trimestral
-    if {"nome_fantasia","media_trimestral"}.issubset(dff.columns) and not dff.empty:
-        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia","media_trimestral"]]
+    # Top sites — média_trimestral (jul/ago/set)
+    if {"nome_fantasia", "media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia", "media_trimestral"]]
         g4 = g4.sort_values("media_trimestral", ascending=ascending)
         seq4 = get_sequence(theme, len(g4))
         fig_sites = px.bar(
             g4, x="media_trimestral", y="nome_fantasia", orientation="h",
             text="media_trimestral",
-            title="Top 10 Sites (Média Trimestral)",
+            title="Top 10 Sites (Média Trimestral Jul/Ago/Set)",
             color="nome_fantasia", color_discrete_sequence=seq4,
         )
         fig_sites.update_traces(
@@ -439,7 +471,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_busca, order, n_reload, theme):
             xaxis_title="Média Trimestral", yaxis_title="Site",
         )
     else:
-        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral)")
+        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral Jul/Ago/Set)")
     style_fig(fig_sites, theme)
 
     # Tabela
@@ -542,30 +574,30 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
         fig_cidades = px.bar(title="Top 10 Cidades")
     style_fig(fig_cidades, pdf_theme); fig_cidades.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
-    # Meses
-    vj = float(dff["visualizacoes_junho"].sum()) if "visualizacoes_junho" in dff else 0.0
-    vl = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
-    va = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
-    g3 = pd.DataFrame({"Mês":["Junho","Julho","Agosto"], "Visualizações":[vj,vl,va]}).sort_values("Visualizações", ascending=ascending)
+    # Meses (JUL/AGO/SET)
+    vjul = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    vago = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    vset = float(dff["visualizacoes_setembro"].sum()) if "visualizacoes_setembro" in dff else 0.0
+    g3 = pd.DataFrame({"Mês":["Julho","Agosto","Setembro"], "Visualizações":[vjul, vago, vset]}).sort_values("Visualizações", ascending=ascending)
     seq3 = get_sequence(pdf_theme, len(g3))
-    fig_meses = px.bar(g3, x="Mês", y="Visualizações", text="Visualizações", title="Total de Visualizações por Mês",
+    fig_meses = px.bar(g3, x="Mês", y="Visualizações", text="Visualizações", title="Total de Visualizações por Mês (Jul/Ago/Set)",
                        color="Mês", color_discrete_sequence=seq3)
     fig_meses.update_traces(texttemplate="%{text:.0f}", textposition="outside")
     fig_meses.update_layout(showlegend=False, xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()))
     style_fig(fig_meses, pdf_theme); fig_meses.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
-    # Top Sites por Média
+    # Top Sites por Média (jul/ago/set)
     if {"nome_fantasia","media_trimestral"}.issubset(dff.columns) and not dff.empty:
         g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia","media_trimestral"]]
         g4 = g4.sort_values("media_trimestral", ascending=ascending)
         seq4 = get_sequence(pdf_theme, len(g4))
         fig_sites = px.bar(g4, x="media_trimestral", y="nome_fantasia", orientation="h", text="media_trimestral",
-                           title="Top 10 Sites (Média Trimestral)", color="nome_fantasia", color_discrete_sequence=seq4)
+                           title="Top 10 Sites (Média Trimestral Jul/Ago/Set)", color="nome_fantasia", color_discrete_sequence=seq4)
         fig_sites.update_traces(texttemplate="%{text:.0f}")
         fig_sites.update_layout(showlegend=False, yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()),
                                 xaxis_title="Média Trimestral", yaxis_title="Site")
     else:
-        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral)")
+        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral Jul/Ago/Set)")
     style_fig(fig_sites, pdf_theme); fig_sites.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
     figs = [fig_status, fig_cidades, fig_meses, fig_sites]
@@ -610,8 +642,10 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_busca, order, theme):
             if (i % 2 == 1) or (i == len(figs)-1):
                 t = Table([[row_imgs[0]] + ([row_imgs[1]] if len(row_imgs) > 1 else [])],
                           colWidths=[col_w, col_w] if len(row_imgs) > 1 else [col_w])
-                t.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),
-                                       ("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),
+                t.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),
+                                       ("LEFTPADDING",(0,0),(-1,-1),0),
+                                       ("RIGHTPADDING",(0,0),(-1,-1),0),
+                                       ("TOPPADDING",(0,0),(-1,-1),0),
                                        ("BOTTOMPADDING",(0,0),(-1,-1),0)]))
                 story += [t, Spacer(1, 8)]
                 row_imgs = []
