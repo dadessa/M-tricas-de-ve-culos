@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v3.3)
-- Filtro "Nome do Veículo" agora é um Dropdown com multi-seleção (lista de sites)
-- Toda a lógica de filtro/exports/PDF usa o novo campo f_sites
-- Mantém: meses Jul/Ago/Set; Top 10 por média_trimestral; tabela contínua
+Métricas de Veículos (v3.4)
+- 'Nome do Veículo' como Dropdown multi-seleção (f_sites)
+- Filtros, exportações e PDF ajustados para usar f_sites
+- Meses Jul/Ago/Set + Média Trimestral
+- Top 10 por Média Trimestral
+- Tabela contínua (sem paginação)
+- Exportar PDF (gráficos + tabela) e Excel/CSV (fallback)
 """
 
 import os
@@ -211,7 +214,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v3.3", className="badge"),
+                html.Span("v3.4", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -261,7 +264,7 @@ app.layout = html.Div(className="light", id="root", children=[
                     dcc.Dropdown(
                         id="f_sites",
                         options=[{"label": n, "value": n} for n in sorted(DF_BASE["nome_do_veiculo"].dropna().unique())] if "nome_do_veiculo" in DF_BASE else [],
-                        multi=True, placeholder="Selecione sites…", clearable=True,
+                        multi=True, placeholder="Selecione sites…", clearable=True, searchable=True,
                     ),
                 ]),
                 html.Div(children=[
@@ -347,7 +350,7 @@ def set_theme(theme): return "light" if theme == "light" else "dark"
     Input("f_cidade", "value"),
     Input("f_status", "value"),
     Input("f_categoria", "value"),
-    Input("f_sites", "value"),          # <<-- novo
+    Input("f_sites", "value"),
     Input("sort-order", "value"),
     Input("btn-reload", "n_clicks"),
     State("theme-toggle", "value"),
@@ -372,7 +375,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, order, n_reload, theme):
             color="status",
             color_discrete_map={
                 "APROVADO": "#22C55E","REPROVADO": "#EF4444",
-                "APROVADO PARCIAL": "#F59E0B","PENDENTE": "#A78BFA","INSTA": "#06B6D4",
+                "APROVADO PARCIAL": "#F59E0B","PENDENTE": "#A78BFA","INSTA":"#06B6D4",
             },
         )
         fig_status.update_traces(textposition="outside")
@@ -419,8 +422,8 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, order, n_reload, theme):
     style_fig(fig_meses, theme)
 
     # Top sites — média_trimestral (Jul/Ago/Set)
-    if {"nome_fantasia", "media_trimestral"}.issubset(dff.columns) and not dff.empty:
-        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia", "media_trimestral"]]
+    if {"nome_fantasia","media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia","media_trimestral"]]
         g4 = g4.sort_values("media_trimestral", ascending=ascending)
         seq4 = get_sequence(theme, len(g4))
         fig_sites = px.bar(
@@ -459,7 +462,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, order, n_reload, theme):
     Output("f_cidade", "options"),
     Output("f_status", "options"),
     Output("f_categoria", "options"),
-    Output("f_sites", "options"),      # <<-- novo
+    Output("f_sites", "options"),
     Input("btn-reload", "n_clicks"),
     prevent_initial_call=True
 )
@@ -478,7 +481,7 @@ def refresh_filter_options(n):
     State("f_cidade", "value"),
     State("f_status", "value"),
     State("f_categoria", "value"),
-    State("f_sites", "value"),   # <<-- trocado
+    State("f_sites", "value"),
     prevent_initial_call=True
 )
 def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites):
@@ -502,7 +505,7 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites) -> pd.Data
     State("f_cidade", "value"),
     State("f_status", "value"),
     State("f_categoria", "value"),
-    State("f_sites", "value"),   # <<-- trocado
+    State("f_sites", "value"),
     State("sort-order", "value"),
     State("theme-toggle", "value"),
     prevent_initial_call=True
