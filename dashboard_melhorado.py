@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v3.4)
+Métricas de Veículos (v3.5)
 - 'Nome do Veículo' como Dropdown multi-seleção (f_sites)
-- Filtros, exportações e PDF ajustados para usar f_sites
+- Coluna 'Valor' EDITÁVEL por site na tabela (persiste na sessão)
+- Exportar Excel/CSV e PDF incluem a coluna 'Valor'
 - Meses Jul/Ago/Set + Média Trimestral
 - Top 10 por Média Trimestral
 - Tabela contínua (sem paginação)
-- Exportar PDF (gráficos + tabela) e Excel/CSV (fallback)
 """
 
 import os
@@ -208,13 +208,14 @@ def kpi_card(kpi_id: str, label: str):
 
 # claro por padrão
 app.layout = html.Div(className="light", id="root", children=[
+    dcc.Store(id="store_valores", storage_type="session"),  # mapeia {nome_do_veiculo: valor}
     html.Div(className="container", children=[
         # Navbar
         html.Div(className="navbar", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v3.4", className="badge"),
+                html.Span("v3.5", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -316,6 +317,7 @@ app.layout = html.Div(className="light", id="root", children=[
                         {"if": {"column_id": "status"}, "minWidth":"120px","width":"140px","maxWidth":"200px"},
                         {"if": {"column_id": "motivo"}, "minWidth":"240px","width":"360px","maxWidth":"560px"},
                         {"if": {"column_id": "media_trimestral"}, "textAlign":"right"},
+                        {"if": {"column_id": "valor"}, "textAlign":"right"},
                     ],
                 ),
             ]),
@@ -323,7 +325,7 @@ app.layout = html.Div(className="light", id="root", children=[
     ]),
 ])
 
-# ========= CALLBACKS =========
+# ========= CALLBACKS / FILTRO =========
 def _filtrar(base: pd.DataFrame, cidade, status, categoria, sites) -> pd.DataFrame:
     dff = base.copy()
     if cidade:    dff = dff[dff["cidade"].isin(cidade)]
@@ -354,11 +356,17 @@ def set_theme(theme): return "light" if theme == "light" else "dark"
     Input("sort-order", "value"),
     Input("btn-reload", "n_clicks"),
     State("theme-toggle", "value"),
+    State("store_valores", "data"),
 )
-def atualizar(f_cidade, f_status, f_categoria, f_sites, order, n_reload, theme):
+def atualizar(f_cidade, f_status, f_categoria, f_sites, order, n_reload, theme, store_vals):
     base = load_data() if (n_reload and n_reload > 0) else DF_BASE
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
     ascending = (order == "asc")
+
+    # aplica valores persistidos
+    store_vals = store_vals or {}
+    # Garante coluna 'valor'
+    dff["valor"] = dff["nome_do_veiculo"].map(store_vals).fillna(0.0)
 
     total = int(len(dff))
     aprov = int((dff["status"] == "APROVADO").sum()) if "status" in dff else 0
@@ -375,7 +383,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, order, n_reload, theme):
             color="status",
             color_discrete_map={
                 "APROVADO": "#22C55E","REPROVADO": "#EF4444",
-                "APROVADO PARCIAL": "#F59E0B","PENDENTE": "#A78BFA","INSTA":"#06B6D4",
+                "APROVADO PARCIAL": "#F59E0B","PENDENTE":"#A78BFA","INSTA":"#06B6D4",
             },
         )
         fig_status.update_traces(textposition="outside")
@@ -442,20 +450,49 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, order, n_reload, theme):
     style_fig(fig_sites, theme)
 
     # Tabela
-    cols_order = ["nome_do_veiculo","cidade","status","motivo","media_trimestral"]
-    friendly = {"nome_do_veiculo":"Nome do Veículo","cidade":"Cidade","status":"Status","motivo":"Motivo","media_trimestral":"Média Trimestral"}
+    cols_order = ["nome_do_veiculo","cidade","status","motivo","media_trimestral","valor"]
+    friendly = {
+        "nome_do_veiculo":"Nome do Veículo","cidade":"Cidade","status":"Status",
+        "motivo":"Motivo","media_trimestral":"Média Trimestral","valor":"Valor"
+    }
     present = [c for c in cols_order if c in dff.columns]
-    fmt_int = Format(group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",", precision=0, scheme=Scheme.fixed)
+    fmt_int0 = Format(group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",", precision=0, scheme=Scheme.fixed)
+    fmt_money = Format(group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",", precision=2, scheme=Scheme.fixed)
     columns = []
     for c in present:
         col_def = {"name": friendly.get(c, c), "id": c}
         if c == "media_trimestral":
-            col_def.update({"type":"numeric","format":fmt_int})
+            col_def.update({"type":"numeric","format":fmt_int0})
+        if c == "valor":
+            col_def.update({"type":"numeric","format":fmt_money, "editable": True})
         columns.append(col_def)
     data = dff[present].to_dict("records")
 
     return (f"{total}", f"{aprov}", f"{reprov}", f"{cidades_qtd}",
             fig_status, fig_cidades, fig_meses, fig_sites, data, columns)
+
+# Persiste os valores editados na sessão
+@app.callback(
+    Output("store_valores", "data"),
+    Input("tbl", "data_timestamp"),
+    State("tbl", "data"),
+    State("store_valores", "data"),
+    prevent_initial_call=True
+)
+def persistir_valores(_, table_data, store_vals):
+    store_vals = store_vals or {}
+    if not table_data:
+        return store_vals
+    for row in table_data:
+        nome = str(row.get("nome_do_veiculo", "")).strip()
+        if not nome:
+            continue
+        try:
+            v = float(row.get("valor", 0) or 0)
+        except Exception:
+            v = 0.0
+        store_vals[nome] = v
+    return store_vals
 
 # Atualiza opções dos filtros ao clicar em "Atualizar dados"
 @app.callback(
@@ -475,6 +512,14 @@ def refresh_filter_options(n):
     return cidades, status, cats, sites
 
 # ========= EXPORTS =========
+def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites, store_vals) -> pd.DataFrame:
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
+    store_vals = store_vals or {}
+    dff["valor"] = dff["nome_do_veiculo"].map(store_vals).fillna(0.0)
+    cols_export = ["nome_do_veiculo","cidade","status","motivo","media_trimestral","valor"]
+    return dff[[c for c in cols_export if c in dff.columns]].copy()
+
 @app.callback(
     Output("download_excel", "data"),
     Input("btn-export-excel", "n_clicks"),
@@ -482,23 +527,18 @@ def refresh_filter_options(n):
     State("f_status", "value"),
     State("f_categoria", "value"),
     State("f_sites", "value"),
+    State("store_valores", "data"),
     prevent_initial_call=True
 )
-def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites):
-    df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites)
+def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, store_vals):
+    df = _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites, store_vals)
     try:
         return dcc.send_data_frame(df.to_excel, "metricas_de_veiculos.xlsx", sheet_name="Dados", index=False)
     except Exception as e:
         print("[export_excel] Falhou to_excel, fallback para CSV:", e)
         return dcc.send_data_frame(df.to_csv, "metricas_de_veiculos.csv", index=False)
 
-def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites) -> pd.DataFrame:
-    base = load_data()
-    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
-    cols_export = ["nome_do_veiculo","cidade","status","motivo","media_trimestral"]
-    return dff[[c for c in cols_export if c in dff.columns]].copy()
-
-# ---- PDF
+# ---- PDF (gráficos + tabela com 'Valor')
 @app.callback(
     Output("download_pdf", "data"),
     Input("btn-export-pdf", "n_clicks"),
@@ -508,11 +548,15 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites) -> pd.Data
     State("f_sites", "value"),
     State("sort-order", "value"),
     State("theme-toggle", "value"),
+    State("store_valores", "data"),
     prevent_initial_call=True
 )
-def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, order, theme):
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, order, theme, store_vals):
     base = load_data()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
+    store_vals = store_vals or {}
+    dff["valor"] = dff["nome_do_veiculo"].map(store_vals).fillna(0.0)
+
     ascending = (order == "asc")
     pdf_theme = "light"
 
@@ -619,14 +663,23 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, order, theme):
                 story += [t, Spacer(1, 8)]
                 row_imgs = []
 
-        labels = {"nome_do_veiculo":"Nome do Veículo","cidade":"Cidade","status":"Status","motivo":"Motivo","media_trimestral":"Média Trimestral"}
-        col_keys = [c for c in ["nome_do_veiculo","cidade","status","motivo","media_trimestral"] if c in dff.columns]
+        labels = {
+            "nome_do_veiculo":"Nome do Veículo","cidade":"Cidade","status":"Status",
+            "motivo":"Motivo","media_trimestral":"Média Trimestral","valor":"Valor"
+        }
+        col_keys = [c for c in ["nome_do_veiculo","cidade","status","motivo","media_trimestral","valor"] if c in dff.columns]
         headers = [labels[k] for k in col_keys]
         data = [[Paragraph(h, header_style) for h in headers]]
 
         def fmt_int(x):
             try: return str(f"{int(round(float(x))):,}").replace(",", ".")
             except: return str(x)
+        def fmt_money(x):
+            try:
+                s = f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                return s
+            except:
+                return str(x)
 
         for _, row in dff[col_keys].iterrows():
             line = []
@@ -634,16 +687,20 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, order, theme):
                 v = row[k]
                 if k == "media_trimestral":
                     line.append(Paragraph(fmt_int(v), cell_text))
+                elif k == "valor":
+                    line.append(Paragraph(fmt_money(v), cell_text))
                 elif k in ["nome_do_veiculo","motivo"]:
                     line.append(Paragraph(str(v), cell_wrap))
                 else:
                     line.append(Paragraph(str(v), cell_text))
             data.append(line)
 
-        weights = {"nome_do_veiculo":3.8,"cidade":1.3,"status":1.2,"motivo":3.8,"media_trimestral":1.6}
+        weights = {"nome_do_veiculo":3.4,"cidade":1.2,"status":1.1,"motivo":3.4,"media_trimestral":1.4,"valor":1.5}
         wlist = [weights.get(k,1.0) for k in col_keys]
         col_widths = [(w/sum(wlist))*avail_w for w in wlist]
 
+        from reportlab.platypus import TableStyle
+        from reportlab.lib import colors
         tbl = Table(data, colWidths=col_widths, repeatRows=1); tbl.splitByRow = 1
         styles_tbl = [
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),
@@ -656,9 +713,10 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, order, theme):
             ("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),
             ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
         ]
-        idx_media = [i for i,k in enumerate(col_keys) if k=="media_trimestral"]
-        for idx in idx_media:
-            styles_tbl.append(("ALIGN",(idx,1),(idx,-1),"RIGHT"))
+        # alinhamento numérico
+        for idx, k in enumerate(col_keys):
+            if k in ["media_trimestral","valor"]:
+                styles_tbl.append(("ALIGN",(idx,1),(idx,-1),"RIGHT"))
         tbl.setStyle(TableStyle(styles_tbl))
         story += [Spacer(1,4), tbl]
         doc.build(story)
