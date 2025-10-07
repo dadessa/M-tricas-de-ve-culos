@@ -1,19 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v3.8)
-- Persistência de valores (Valor Planejado / Valor Pago) em JSON no servidor
-  * Arquivo: VALORES_JSON_PATH (env) ou 'valores_financeiros.json'
-  * Grava a cada edição na tabela; recarrega no boot e ao "Atualizar dados"
-- 'Valor' renomeado para 'Valor Pago' e 'Valor Planejado' antes de 'Valor Pago'
-- 'Saldo' = Valor Planejado - Valor Pago
-- Filtro "Somente Valor Pago ≠ 0"
-- 'Nome do Veículo' como Dropdown multi-seleção
-- Meses Jul/Ago/Set + Média Trimestral; Top10 por Média
-- Tabela contínua (sem paginação); Exports Excel/CSV e PDF atualizados
+Métricas de Veículos (v3.7)
+- 'Nome do Veículo' como Dropdown multi-seleção (f_sites)
+- Colunas financeiras: Valor Planejado (editável), Valor Pago (editável), Saldo (= Planejado - Pago)
+- Filtro 'Somente Valor ≠ 0' considera Valor Pago
+- Meses Jul/Ago/Set + Média Trimestral; Top 10 por Média
+- Tabela contínua (sem paginação)
+- Exportar Excel/CSV e PDF incluem Planejado/Pago/Saldo
+- Correção de SyntaxError (string não terminada em style_cell_conditional)
 """
 
 import os
-import json
 import time
 import unicodedata
 from io import BytesIO
@@ -22,96 +19,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.io as pio
 from dash import Dash, dcc, html, dash_table
-from dash import Input, Output, State, no_update
+from dash import Input, Output, State
 from dash.dash_table.Format import Format, Group, Scheme
 
-# ========= CONFIG / PERSISTÊNCIA =========
-EXCEL_PATH = "Recadastramento (respostas).xlsx"       # fallback local (dev)
-SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")          # defina no Render (CSV público)
-VALORES_JSON_PATH = os.getenv("VALORES_JSON_PATH", "valores_financeiros.json")
-
-# Lock simples para I/O (entre threads do mesmo worker)
-try:
-    import threading
-    _MEM_LOCK = threading.Lock()
-except Exception:
-    _MEM_LOCK = None
-
-def _acquire_file_lock(fp):
-    """Tenta bloquear arquivo com fcntl (Unix). Ignora em Windows/indisponível."""
-    try:
-        import fcntl
-        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-        return True
-    except Exception:
-        return False
-
-def _release_file_lock(fp):
-    try:
-        import fcntl
-        fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
-
-def _safe_dir_for(path: str):
-    d = os.path.dirname(os.path.abspath(path))
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
-
-def _read_persisted_vals() -> dict:
-    """Lê JSON persistido; formato: {nome_do_veiculo: {valor_planejado: float, valor_pago: float}}"""
-    path = VALORES_JSON_PATH
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            _acquire_file_lock(f)
-            data = json.load(f)
-            _release_file_lock(f)
-        if isinstance(data, dict):
-            return data
-        return {}
-    except Exception as e:
-        print("[persist] Falha ao ler JSON:", e)
-        return {}
-
-def _write_persisted_vals(data: dict) -> None:
-    """Escrita atômica: arquivo temporário + replace."""
-    path = VALORES_JSON_PATH
-    try:
-        _safe_dir_for(path)
-        tmp = f"{path}.tmp"
-        # Lock em memória no worker
-        if _MEM_LOCK:
-            _MEM_LOCK.acquire()
-        with open(tmp, "w", encoding="utf-8") as f:
-            _acquire_file_lock(f)
-            json.dump(data, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            f.flush()
-            os.fsync(f.fileno())
-            _release_file_lock(f)
-        os.replace(tmp, path)
-    except Exception as e:
-        print("[persist] Falha ao escrever JSON:", e)
-    finally:
-        try:
-            if _MEM_LOCK:
-                _MEM_LOCK.release()
-        except Exception:
-            pass
-
-def _merge_persisted_into_df(df: pd.DataFrame, persisted: dict) -> pd.DataFrame:
-    """Aplica valores persistidos no DataFrame por 'nome_do_veiculo'."""
-    df = df.copy()
-    def _get(nome, key):
-        try:
-            return float(persisted.get(str(nome), {}).get(key, 0) or 0)
-        except Exception:
-            return 0.0
-    df["valor_planejado"] = df["nome_do_veiculo"].apply(lambda n: _get(n, "valor_planejado"))
-    df["valor_pago"]      = df["nome_do_veiculo"].apply(lambda n: _get(n, "valor_pago"))
-    df["saldo"] = df["valor_planejado"] - df["valor_pago"]
-    return df
+# ========= FONTE DE DADOS =========
+EXCEL_PATH = "Recadastramento (respostas).xlsx"   # fallback local (dev)
+SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")      # defina no Render (CSV público)
 
 def _url_with_cache_bust(url: str) -> str:
     sep = "&" if "?" in url else "?"
@@ -212,7 +125,9 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
             df[f"visualizacoes_{mes}"] = 0.0
 
     df["total_visualizacoes"] = (
-        df.get("visualizacoes_julho", 0.0) + df.get("visualizacoes_agosto", 0.0) + df.get("visualizacoes_setembro", 0.0)
+        df.get("visualizacoes_julho", 0.0) +
+        df.get("visualizacoes_agosto", 0.0) +
+        df.get("visualizacoes_setembro", 0.0)
     )
     df["media_trimestral"] = df[["visualizacoes_julho", "visualizacoes_agosto", "visualizacoes_setembro"]].mean(axis=1)
 
@@ -241,9 +156,8 @@ def load_data() -> pd.DataFrame:
         empty = pd.DataFrame(columns=cols)
         return _prepare_df(empty)
 
-# Base e valores persistidos na inicialização
+# Base inicial p/ filtros
 DF_BASE = load_data()
-PERSISTED_VALUES = _read_persisted_vals()
 
 # ========= TEMA/CORES =========
 THEME_COLORS = {
@@ -296,15 +210,15 @@ def kpi_card(kpi_id: str, label: str):
 
 # claro por padrão
 app.layout = html.Div(className="light", id="root", children=[
-    # Armazenamento no navegador + inicialização com JSON persistido do servidor
-    dcc.Store(id="store_valores", storage_type="session", data=PERSISTED_VALUES),
+    # Armazenamento na sessão: {nome: {"valor_planejado": float, "valor_pago": float}}
+    dcc.Store(id="store_valores", storage_type="session"),
     html.Div(className="container", children=[
         # Navbar
         html.Div(className="navbar", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v3.8", className="badge"),
+                html.Span("v3.7", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -358,10 +272,10 @@ app.layout = html.Div(className="light", id="root", children=[
                     ),
                 ]),
                 html.Div(children=[
-                    html.Div("Filtro de Valor Pago", className="label"),
+                    html.Div("Filtro de Valor", className="label"),
                     dcc.Checklist(
                         id="f_valor_nzero",
-                        options=[{"label": "Somente Valor Pago ≠ 0", "value": "nz"}],
+                        options=[{"label": "Somente Valor ≠ 0", "value": "nz"}],
                         value=[],
                         inline=True,
                         inputStyle={"marginRight":"6px","marginLeft":"10px"},
@@ -397,7 +311,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="card", children=[dcc.Graph(id="g_top_sites", config={"displayModeBar": False})]),
         ]),
 
-        # Tabela contínua
+        # Tabela (lista contínua)
         html.Div(className="panel", children=[
             html.Div("Dados detalhados", className="label"),
             html.Div(className="card", children=[
@@ -426,7 +340,7 @@ app.layout = html.Div(className="light", id="root", children=[
     ]),
 ])
 
-# ========= FILTRO =========
+# ========= CALLBACKS / FILTRO =========
 def _filtrar(base: pd.DataFrame, cidade, status, categoria, sites) -> pd.DataFrame:
     dff = base.copy()
     if cidade:    dff = dff[dff["cidade"].isin(cidade)]
@@ -438,7 +352,7 @@ def _filtrar(base: pd.DataFrame, cidade, status, categoria, sites) -> pd.DataFra
 @app.callback(Output("root", "className"), Input("theme-toggle", "value"))
 def set_theme(theme): return "light" if theme == "light" else "dark"
 
-# ========= KPI, GRÁFICOS e TABELA =========
+# Atualiza KPI/Gráficos/Tabela
 @app.callback(
     Output("kpi_total", "children"),
     Output("kpi_aprov", "children"),
@@ -462,19 +376,23 @@ def set_theme(theme): return "light" if theme == "light" else "dark"
 )
 def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_reload, theme, store_vals):
     base = load_data() if (n_reload and n_reload > 0) else DF_BASE
-
-    # sempre aplica os valores persistidos do servidor, MESMO que o store esteja vazio
-    persisted = _read_persisted_vals()
-    store_vals = store_vals or persisted or {}
-    # daremos preferência ao que vier do store (edits recentes no cliente)
-    merged_vals = {**persisted, **(store_vals or {})}
-
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
-    dff = _merge_persisted_into_df(dff, merged_vals)
-
     ascending = (order == "asc")
 
-    # filtro: Somente Valor Pago ≠ 0
+    # aplica valores persistidos
+    store_vals = store_vals or {}
+    def _get(nome, key):
+        d = store_vals.get(nome, {})
+        try:
+            return float(d.get(key, 0) or 0)
+        except Exception:
+            return 0.0
+
+    dff["valor_planejado"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_planejado"))
+    dff["valor_pago"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_pago"))
+    dff["saldo"] = dff["valor_planejado"] - dff["valor_pago"]
+
+    # filtro: Somente Valor ≠ 0 (considera Valor Pago)
     if f_valor_nzero and "nz" in f_valor_nzero:
         dff = dff[(dff["valor_pago"].abs() > 0)]
 
@@ -585,43 +503,35 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
     return (f"{total}", f"{aprov}", f"{reprov}", f"{cidades_qtd}",
             fig_status, fig_cidades, fig_meses, fig_sites, data, columns)
 
-# ========= PERSISTIR EDIÇÕES =========
+# Persiste valores na sessão: valor_planejado e valor_pago
 @app.callback(
-    Output("store_valores", "data"),                       # devolve o snapshot atualizado ao cliente
-    Input("tbl", "data_timestamp"),                        # dispara após edição na DataTable
+    Output("store_valores", "data"),
+    Input("tbl", "data_timestamp"),
     State("tbl", "data"),
     State("store_valores", "data"),
     prevent_initial_call=True
 )
 def persistir_valores(_, table_data, store_vals):
-    # Carga do arquivo atual para minimizar perda em writes concorrentes
-    current_file = _read_persisted_vals()
-    store_vals = store_vals or current_file or {}
+    store_vals = store_vals or {}
     if not table_data:
         return store_vals
-
-    updated = {**current_file, **store_vals}  # prioridade para o que o cliente já tinha
-
     for row in table_data:
         nome = str(row.get("nome_do_veiculo", "")).strip()
         if not nome:
             continue
-        d = updated.get(nome, {})
+        d = store_vals.get(nome, {})
         try:
-            d["valor_planejado"] = float(row.get("valor_planejado", d.get("valor_planejado", 0)) or 0)
+            d["valor_planejado"] = float(row.get("valor_planejado", 0) or 0)
         except Exception:
-            d["valor_planejado"] = float(d.get("valor_planejado", 0) or 0)
+            d["valor_planejado"] = 0.0
         try:
-            d["valor_pago"] = float(row.get("valor_pago", d.get("valor_pago", 0)) or 0)
+            d["valor_pago"] = float(row.get("valor_pago", 0) or 0)
         except Exception:
-            d["valor_pago"] = float(d.get("valor_pago", 0) or 0)
-        updated[nome] = d
+            d["valor_pago"] = 0.0
+        store_vals[nome] = d
+    return store_vals
 
-    # grava no arquivo (atômico) e devolve ao store
-    _write_persisted_vals(updated)
-    return updated
-
-# ========= REFRESH OPCÕES DE FILTRO =========
+# Atualiza opções dos filtros ao clicar em "Atualizar dados"
 @app.callback(
     Output("f_cidade", "options"),
     Output("f_status", "options"),
@@ -639,11 +549,19 @@ def refresh_filter_options(n):
     return cidades, status, cats, sites
 
 # ========= EXPORTS =========
-def _prepare_export_df(f_cidade, f_status, f_categoria, f_sites, nz_flag) -> pd.DataFrame:
+def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites, store_vals, nz_flag) -> pd.DataFrame:
     base = load_data()
-    persisted = _read_persisted_vals()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
-    dff = _merge_persisted_into_df(dff, persisted)
+    store_vals = store_vals or {}
+    def _get(nome, key):
+        d = store_vals.get(nome, {})
+        try:
+            return float(d.get(key, 0) or 0)
+        except Exception:
+            return 0.0
+    dff["valor_planejado"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_planejado"))
+    dff["valor_pago"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_pago"))
+    dff["saldo"] = dff["valor_planejado"] - dff["valor_pago"]
     if nz_flag:
         dff = dff[(dff["valor_pago"].abs() > 0)]
     cols_export = ["nome_do_veiculo","cidade","status","motivo",
@@ -658,16 +576,20 @@ def _prepare_export_df(f_cidade, f_status, f_categoria, f_sites, nz_flag) -> pd.
     State("f_categoria", "value"),
     State("f_sites", "value"),
     State("f_valor_nzero", "value"),
+    State("store_valores", "data"),
     prevent_initial_call=True
 )
-def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero):
-    df = _prepare_export_df(f_cidade, f_status, f_categoria, f_sites, nz_flag=("nz" in (f_valor_nzero or [])))
+def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, store_vals):
+    df = _filtered_df_for_export(
+        f_cidade, f_status, f_categoria, f_sites, store_vals, nz_flag=("nz" in (f_valor_nzero or []))
+    )
     try:
         return dcc.send_data_frame(df.to_excel, "metricas_de_veiculos.xlsx", sheet_name="Dados", index=False)
     except Exception as e:
         print("[export_excel] Falhou to_excel, fallback para CSV:", e)
         return dcc.send_data_frame(df.to_csv, "metricas_de_veiculos.csv", index=False)
 
+# ---- PDF (gráficos + tabela com Planejado/Pago/Saldo)
 @app.callback(
     Output("download_pdf", "data"),
     Input("btn-export-pdf", "n_clicks"),
@@ -678,18 +600,32 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero):
     State("f_valor_nzero", "value"),
     State("sort-order", "value"),
     State("theme-toggle", "value"),
+    State("store_valores", "data"),
     prevent_initial_call=True
 )
-def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme):
-    # prepara dados já com persistidos
-    df_base = _prepare_export_df(f_cidade, f_status, f_categoria, f_sites, nz_flag=("nz" in (f_valor_nzero or [])))
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
+    store_vals = store_vals or {}
+    def _get(nome, key):
+        d = store_vals.get(nome, {})
+        try:
+            return float(d.get(key, 0) or 0)
+        except Exception:
+            return 0.0
+    dff["valor_planejado"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_planejado"))
+    dff["valor_pago"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_pago"))
+    dff["saldo"] = dff["valor_planejado"] - dff["valor_pago"]
+
+    if f_valor_nzero and "nz" in f_valor_nzero:
+        dff = dff[(dff["valor_pago"].abs() > 0)]
+
     ascending = (order == "asc")
     pdf_theme = "light"
 
-    # Gráficos baseados no df_base
     # Status
-    if "status" in df_base and not df_base.empty:
-        g1 = df_base["status"].astype(str).str.upper().value_counts().reset_index()
+    if "status" in dff and not dff.empty:
+        g1 = dff["status"].astype(str).str.upper().value_counts().reset_index()
         g1.columns = ["status", "qtd"]
         g1 = g1.sort_values("qtd", ascending=ascending)
         fig_status = px.bar(g1, x="status", y="qtd", text="qtd", title="Distribuição por Status", color="status",
@@ -701,8 +637,8 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
     style_fig(fig_status, pdf_theme); fig_status.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
     # Top Cidades
-    if "cidade" in df_base and not df_base.empty:
-        base_cid = df_base["cidade"].value_counts().reset_index()
+    if "cidade" in dff and not dff.empty:
+        base_cid = dff["cidade"].value_counts().reset_index()
         base_cid.columns = ["cidade","qtd"]
         base_cid = base_cid.sort_values("qtd", ascending=False).head(10)
         base_cid = base_cid.sort_values("qtd", ascending=ascending)
@@ -714,12 +650,10 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
         fig_cidades = px.bar(title="Top 10 Cidades")
     style_fig(fig_cidades, pdf_theme); fig_cidades.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
-    # Meses (Jul/Ago/Set) — com base nos dados brutos (export tem só média/saldos)
-    base_raw = _filtrar(load_data(), f_cidade, f_status, f_categoria, f_sites)
-    base_raw = _merge_persisted_into_df(base_raw, _read_persisted_vals())
-    vjul = float(base_raw.get("visualizacoes_julho", pd.Series(dtype=float)).sum())
-    vago = float(base_raw.get("visualizacoes_agosto", pd.Series(dtype=float)).sum())
-    vset = float(base_raw.get("visualizacoes_setembro", pd.Series(dtype=float)).sum())
+    # Meses (Jul/Ago/Set)
+    vjul = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    vago = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    vset = float(dff["visualizacoes_setembro"].sum()) if "visualizacoes_setembro" in dff else 0.0
     g3 = pd.DataFrame({"Mês":["Julho","Agosto","Setembro"], "Visualizações":[vjul, vago, vset]}).sort_values("Visualizações", ascending=ascending)
     seq3 = get_sequence(pdf_theme, len(g3))
     fig_meses = px.bar(g3, x="Mês", y="Visualizações", text="Visualizações", title="Total de Visualizações por Mês (Jul/Ago/Set)",
@@ -729,8 +663,8 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
     style_fig(fig_meses, pdf_theme); fig_meses.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
     # Top Sites por Média (Jul/Ago/Set)
-    if {"nome_do_veiculo","media_trimestral"}.issubset(base_raw.columns) and not base_raw.empty:
-        g4 = base_raw.nlargest(10, "media_trimestral")[["nome_fantasia","media_trimestral"]]
+    if {"nome_fantasia","media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia","media_trimestral"]]
         g4 = g4.sort_values("media_trimestral", ascending=ascending)
         seq4 = get_sequence(pdf_theme, len(g4))
         fig_sites = px.bar(g4, x="media_trimestral", y="nome_fantasia", orientation="h", text="media_trimestral",
@@ -798,7 +732,7 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
             "valor_planejado":"Valor Planejado","valor_pago":"Valor Pago","saldo":"Saldo"
         }
         col_keys = [c for c in ["nome_do_veiculo","cidade","status","motivo",
-                                "media_trimestral","valor_planejado","valor_pago","saldo"] if c in df_base.columns]
+                                "media_trimestral","valor_planejado","valor_pago","saldo"] if c in dff.columns]
         headers = [labels[k] for k in col_keys]
         data = [[Paragraph(h, header_style) for h in headers]]
 
@@ -812,7 +746,7 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
             except:
                 return str(x)
 
-        for _, row in df_base[col_keys].iterrows():
+        for _, row in dff[col_keys].iterrows():
             line = []
             for k in col_keys:
                 v = row[k]
@@ -831,8 +765,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
         wlist = [weights.get(k,1.0) for k in col_keys]
         col_widths = [(w/sum(wlist))*avail_w for w in wlist]
 
-        from reportlab.platypus import Table, TableStyle
-        from reportlab.lib import colors
         tbl = Table(data, colWidths=col_widths, repeatRows=1); tbl.splitByRow = 1
         styles_tbl = [
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),
@@ -845,6 +777,7 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
             ("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),
             ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
         ]
+        # alinhamento numérico
         for idx, k in enumerate(col_keys):
             if k in ["media_trimestral","valor_planejado","valor_pago","saldo"]:
                 styles_tbl.append(("ALIGN",(idx,1),(idx,-1),"RIGHT"))
@@ -853,21 +786,6 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
         doc.build(story)
 
     return dcc.send_bytes(_to_pdf, "metricas_de_veiculos.pdf")
-
-# ========= REFRESH COMPLETO (dados + valores) =========
-@app.callback(
-    Output("store_valores", "data"),
-    Input("btn-reload", "n_clicks"),
-    State("store_valores", "data"),
-    prevent_initial_call=True
-)
-def recarregar_store(n, current_store):
-    # re-sincroniza o store com o arquivo no disco (mantendo qualquer edição que já esteja no store)
-    persisted = _read_persisted_vals()
-    merged = {**(persisted or {}), **(current_store or {})}
-    # grava o merge (para garantir que não perdemos nada do store)
-    _write_persisted_vals(merged)
-    return merged
 
 # RUN
 if __name__ == "__main__":
