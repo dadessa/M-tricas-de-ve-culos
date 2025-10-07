@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v3.8)
-- Persistência de valores (Valor Planejado / Valor Pago) em JSON no servidor
-  * Arquivo: VALORES_JSON_PATH (env) ou 'valores_financeiros.json'
-  * Grava a cada edição na tabela; recarrega no boot e ao "Atualizar dados"
-- 'Valor' renomeado para 'Valor Pago' e 'Valor Planejado' antes de 'Valor Pago'
-- 'Saldo' = Valor Planejado - Valor Pago
-- Filtro "Somente Valor Pago ≠ 0"
-- 'Nome do Veículo' como Dropdown multi-seleção
-- Meses Jul/Ago/Set + Média Trimestral; Top10 por Média
-- Tabela contínua (sem paginação); Exports Excel/CSV e PDF atualizados
+Métricas de Veículos (v3.8.2)
+- FIX: Pipeline de dados mais resiliente (Google Sheets CSV / Excel local)
+  * Novas rotas de leitura com múltiplas tentativas, encodings e engines
+  * Suporte a URL do Google Sheets construída via SHEETS_GSHEET_ID + SHEETS_GID
+  * Opção de forçar fonte local via FORCE_LOCAL_DATA=1
+  * Validação mínima do dataset (tem linhas/colunas) antes de aceitar
+  * Fallback garantido para DataFrame vazio SEM quebrar o app
+- Persistência de valores (Valor Planejado / Valor Pago) em JSON (inalterado)
+- Filtro “Somente Valor Pago ≠ 0” (inalterado)
+- Meses Jul/Ago/Set + Média Trimestral; Top10 por Média (inalterado)
+- Tabela contínua e exports atualizados (inalterado)
 """
 
 import os
@@ -17,18 +18,26 @@ import json
 import time
 import unicodedata
 from io import BytesIO
+from typing import Optional
 
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
 from dash import Dash, dcc, html, dash_table
-from dash import Input, Output, State, no_update
+from dash import Input, Output, State
 from dash.dash_table.Format import Format, Group, Scheme
 
 # ========= CONFIG / PERSISTÊNCIA =========
-EXCEL_PATH = "Recadastramento (respostas).xlsx"       # fallback local (dev)
-SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")          # defina no Render (CSV público)
+EXCEL_PATH = os.getenv("EXCEL_PATH", "Recadastramento (respostas).xlsx")  # fallback local (dev)
+SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")                              # CSV público direto
+SHEETS_GSHEET_ID = os.getenv("SHEETS_GSHEET_ID")                          # id do arquivo do Sheets
+SHEETS_GID = os.getenv("SHEETS_GID")                                      # gid da aba
+FORCE_LOCAL_DATA = os.getenv("FORCE_LOCAL_DATA", "0") == "1"              # força carregar apenas do Excel
 VALORES_JSON_PATH = os.getenv("VALORES_JSON_PATH", "valores_financeiros.json")
+
+# ========= LOG UTILS =========
+def _log(*args):
+    print("[dashboard]", *args)
 
 # Lock simples para I/O (entre threads do mesmo worker)
 try:
@@ -72,7 +81,7 @@ def _read_persisted_vals() -> dict:
             return data
         return {}
     except Exception as e:
-        print("[persist] Falha ao ler JSON:", e)
+        _log("[persist] Falha ao ler JSON:", e)
         return {}
 
 def _write_persisted_vals(data: dict) -> None:
@@ -81,7 +90,6 @@ def _write_persisted_vals(data: dict) -> None:
     try:
         _safe_dir_for(path)
         tmp = f"{path}.tmp"
-        # Lock em memória no worker
         if _MEM_LOCK:
             _MEM_LOCK.acquire()
         with open(tmp, "w", encoding="utf-8") as f:
@@ -92,7 +100,7 @@ def _write_persisted_vals(data: dict) -> None:
             _release_file_lock(f)
         os.replace(tmp, path)
     except Exception as e:
-        print("[persist] Falha ao escrever JSON:", e)
+        _log("[persist] Falha ao escrever JSON:", e)
     finally:
         try:
             if _MEM_LOCK:
@@ -134,19 +142,19 @@ def clean_numeric(series: pd.Series) -> pd.Series:
     s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
-def _find_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
+def _find_first(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
     for c in candidates:
         if c in df.columns:
             return c
     return None
 
-def _find_by_tokens(df: pd.DataFrame, tokens: list[str]) -> str | None:
+def _find_by_tokens(df: pd.DataFrame, tokens: list[str]) -> Optional[str]:
     for c in df.columns:
         if all(tok in c for tok in tokens):
             return c
     return None
 
-def _resolve_views(df: pd.DataFrame, mes: str) -> str | None:
+def _resolve_views(df: pd.DataFrame, mes: str) -> Optional[str]:
     base_aliases = ["visualizacoes", "vizualizacoes", "views", "pageviews", "page_views", "pageview"]
     aliases = [f"visualizacoes_{mes}", f"vizualizacoes_{mes}",
                f"total_de_visualizacoes_{mes}", f"total_de_vizualizacoes_{mes}"]
@@ -164,11 +172,73 @@ def _resolve_views(df: pd.DataFrame, mes: str) -> str | None:
             if hit: return hit
     return None
 
+# ========= CARREGAMENTO DE DADOS (ROBUSTO) =========
+def _build_gsheets_csv_url() -> Optional[str]:
+    if SHEETS_GSHEET_ID and SHEETS_GID:
+        return f"https://docs.google.com/spreadsheets/d/{SHEETS_GSHEET_ID}/export?format=csv&gid={SHEETS_GID}"
+    return None
+
+def _read_csv_resilient(url: str) -> Optional[pd.DataFrame]:
+    """
+    Tenta ler CSV remoto com diferentes estratégias:
+    - Pandas read_csv com encoding/engine variados
+    - urllib.request + BytesIO se necessário
+    Retorna None se falhar em todas.
+    """
+    if not url:
+        return None
+
+    candidates = []
+    # prioridade: pandas direto
+    candidates.append(("pd_csv_utf8", dict(filepath_or_buffer=_url_with_cache_bust(url),
+                                           encoding="utf-8", engine="python", on_bad_lines="skip")))
+    candidates.append(("pd_csv_utf8sig", dict(filepath_or_buffer=_url_with_cache_bust(url),
+                                              encoding="utf-8-sig", engine="python", on_bad_lines="skip")))
+    candidates.append(("pd_csv_latin1", dict(filepath_or_buffer=_url_with_cache_bust(url),
+                                             encoding="latin1", engine="python", on_bad_lines="skip")))
+    # urllib + pandas
+    def _fetch_bytes(u: str) -> Optional[bytes]:
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                _url_with_cache_bust(u),
+                headers={"User-Agent": "Mozilla/5.0 (DashBot/1.0) Python"}
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return resp.read()
+        except Exception as e:
+            _log("[data] urllib falhou:", e)
+            return None
+
+    raw = _fetch_bytes(url)
+    if raw:
+        candidates.append(("bytes_utf8", dict(filepath_or_buffer=BytesIO(raw),
+                                              encoding="utf-8", engine="python", on_bad_lines="skip")))
+        candidates.append(("bytes_utf8sig", dict(filepath_or_buffer=BytesIO(raw),
+                                                 encoding="utf-8-sig", engine="python", on_bad_lines="skip")))
+        candidates.append(("bytes_latin1", dict(filepath_or_buffer=BytesIO(raw),
+                                                encoding="latin1", engine="python", on_bad_lines="skip")))
+
+    for tag, kwargs in candidates:
+        try:
+            df = pd.read_csv(**kwargs)
+            # limpeza básica
+            if df is not None and isinstance(df, pd.DataFrame):
+                # remove colunas "Unnamed" frequentes no Sheets
+                df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
+                if df.shape[1] > 0:
+                    _log(f"[data] OK via {tag}: linhas={len(df)}, colunas={list(df.columns)[:6]}{'...' if df.shape[1]>6 else ''}")
+                    return df
+        except Exception as e:
+            _log(f"[data] tentativa {tag} falhou:", e)
+
+    return None
+
 def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     original_cols = list(df.columns)
     df.columns = [_normalize(c) for c in df.columns]
-    print("[prepare] Colunas normalizadas:", df.columns.tolist())
+    _log("[prepare] Colunas normalizadas:", df.columns.tolist())
 
     # Nome do veículo
     if "nome_fantasia" not in df.columns:
@@ -208,7 +278,7 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         if col:
             df[f"visualizacoes_{mes}"] = clean_numeric(df[col])
         else:
-            print(f"[prepare] NÃO encontrei coluna de visualizações de {mes.upper()} nas colunas originais:", original_cols)
+            _log(f"[prepare] NÃO encontrei coluna de visualizações de {mes.upper()} nas colunas originais:", original_cols)
             df[f"visualizacoes_{mes}"] = 0.0
 
     df["total_visualizacoes"] = (
@@ -218,28 +288,72 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def _empty_df_skeleton() -> pd.DataFrame:
+    cols = [
+        "nome_fantasia","nome_do_veiculo","cidade","status","motivo","categoria",
+        "visualizacoes_julho","visualizacoes_agosto","visualizacoes_setembro",
+        "total_visualizacoes","media_trimestral","url"
+    ]
+    return pd.DataFrame(columns=cols)
+
 def load_data() -> pd.DataFrame:
-    if SHEETS_CSV_URL:
+    """
+    Ordem de carregamento:
+    1) Se FORCE_LOCAL_DATA=1: tenta Excel local; se falha, devolve vazio preparado
+    2) Tenta SHEETS_CSV_URL (se existir) com leitor resiliente
+    3) Tenta construir URL via SHEETS_GSHEET_ID + SHEETS_GID
+    4) Tenta Excel local
+    5) Fallback vazio preparado
+    """
+    # 1) Force local
+    if FORCE_LOCAL_DATA:
+        _log("[data] FORCE_LOCAL_DATA=1 → tentar Excel local")
         try:
-            url = _url_with_cache_bust(SHEETS_CSV_URL)
-            raw = pd.read_csv(url)
-            print("[load_data] Sheets OK. Linhas:", len(raw), "Colunas originais:", list(raw.columns))
-            return _prepare_df(raw)
+            base = pd.read_excel(EXCEL_PATH)
+            _log("[data] Excel local OK. Linhas:", len(base))
+            return _prepare_df(base)
         except Exception as e:
-            print("[load_data] Falha lendo SHEETS_CSV_URL:", e)
+            _log("[data] Excel local falhou (FORCE_LOCAL). Volta vazio:", e)
+            return _prepare_df(_empty_df_skeleton())
+
+    # 2) SHEETS_CSV_URL direto
+    if SHEETS_CSV_URL:
+        _log("[data] Tentando SHEETS_CSV_URL…")
+        try:
+            raw = _read_csv_resilient(SHEETS_CSV_URL)
+            if raw is not None and raw.shape[0] >= 0 and raw.shape[1] >= 1:
+                _log("[data] Sheets OK via URL. Linhas:", len(raw))
+                return _prepare_df(raw)
+            else:
+                _log("[data] Sheets URL sem colunas/lb. Ignorando.")
+        except Exception as e:
+            _log("[data] Falha lendo SHEETS_CSV_URL:", e)
+
+    # 3) Construir URL do Sheets por ID+GID
+    built_url = _build_gsheets_csv_url()
+    if built_url:
+        _log("[data] Tentando URL construída do Google Sheets…")
+        try:
+            raw2 = _read_csv_resilient(built_url)
+            if raw2 is not None and raw2.shape[1] >= 1:
+                _log("[data] Sheets OK via ID+GID. Linhas:", len(raw2))
+                return _prepare_df(raw2)
+            else:
+                _log("[data] URL ID+GID sem colunas úteis.")
+        except Exception as e:
+            _log("[data] Falha lendo URL construída:", e)
+
+    # 4) Excel local
     try:
         base = pd.read_excel(EXCEL_PATH)
-        print("[load_data] Excel local OK. Linhas:", len(base))
+        _log("[data] Excel local OK. Linhas:", len(base))
         return _prepare_df(base)
     except Exception as e:
-        print("[load_data] Excel local indisponível e Sheets falhou:", e)
-        cols = [
-            "nome_fantasia","nome_do_veiculo","cidade","status","motivo","categoria",
-            "visualizacoes_julho","visualizacoes_agosto","visualizacoes_setembro",
-            "total_visualizacoes","media_trimestral","url"
-        ]
-        empty = pd.DataFrame(columns=cols)
-        return _prepare_df(empty)
+        _log("[data] Excel local indisponível:", e)
+
+    # 5) Fallback vazio
+    _log("[data] Todas as fontes falharam. Retornando DF vazio preparado.")
+    return _prepare_df(_empty_df_skeleton())
 
 # Base e valores persistidos na inicialização
 DF_BASE = load_data()
@@ -304,7 +418,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v3.8", className="badge"),
+                html.Span("v3.8.2", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -461,12 +575,12 @@ def set_theme(theme): return "light" if theme == "light" else "dark"
     State("store_valores", "data"),
 )
 def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_reload, theme, store_vals):
+    # Sempre tentar recarregar dados quando o usuário clicar "Atualizar dados"
     base = load_data() if (n_reload and n_reload > 0) else DF_BASE
 
-    # sempre aplica os valores persistidos do servidor, MESMO que o store esteja vazio
+    # lê do arquivo e mescla com o que estiver no store do cliente
     persisted = _read_persisted_vals()
     store_vals = store_vals or persisted or {}
-    # daremos preferência ao que vier do store (edits recentes no cliente)
     merged_vals = {**persisted, **(store_vals or {})}
 
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
@@ -522,9 +636,9 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
     style_fig(fig_cidades, theme)
 
     # Visualizações por mês (Jul/Ago/Set)
-    vjul = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
-    vago = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
-    vset = float(dff["visualizacoes_setembro"].sum()) if "visualizacoes_setembro" in dff else 0.0
+    vjul = float(dff.get("visualizacoes_julho", pd.Series(dtype=float)).sum())
+    vago = float(dff.get("visualizacoes_agosto", pd.Series(dtype=float)).sum())
+    vset = float(dff.get("visualizacoes_setembro", pd.Series(dtype=float)).sum())
     g3 = pd.DataFrame({"Mês": ["Julho", "Agosto", "Setembro"], "Visualizações": [vjul, vago, vset]}).sort_values(
         "Visualizações", ascending=ascending
     )
@@ -587,20 +701,19 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
 
 # ========= PERSISTIR EDIÇÕES =========
 @app.callback(
-    Output("store_valores", "data"),                       # devolve o snapshot atualizado ao cliente
-    Input("tbl", "data_timestamp"),                        # dispara após edição na DataTable
+    Output("store_valores", "data"),
+    Input("tbl", "data_timestamp"),
     State("tbl", "data"),
     State("store_valores", "data"),
     prevent_initial_call=True
 )
 def persistir_valores(_, table_data, store_vals):
-    # Carga do arquivo atual para minimizar perda em writes concorrentes
     current_file = _read_persisted_vals()
     store_vals = store_vals or current_file or {}
     if not table_data:
         return store_vals
 
-    updated = {**current_file, **store_vals}  # prioridade para o que o cliente já tinha
+    updated = {**current_file, **store_vals}
 
     for row in table_data:
         nome = str(row.get("nome_do_veiculo", "")).strip()
@@ -617,7 +730,6 @@ def persistir_valores(_, table_data, store_vals):
             d["valor_pago"] = float(d.get("valor_pago", 0) or 0)
         updated[nome] = d
 
-    # grava no arquivo (atômico) e devolve ao store
     _write_persisted_vals(updated)
     return updated
 
@@ -665,7 +777,7 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero):
     try:
         return dcc.send_data_frame(df.to_excel, "metricas_de_veiculos.xlsx", sheet_name="Dados", index=False)
     except Exception as e:
-        print("[export_excel] Falhou to_excel, fallback para CSV:", e)
+        _log("[export_excel] Falhou to_excel, fallback para CSV:", e)
         return dcc.send_data_frame(df.to_csv, "metricas_de_veiculos.csv", index=False)
 
 @app.callback(
@@ -681,12 +793,10 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero):
     prevent_initial_call=True
 )
 def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme):
-    # prepara dados já com persistidos
     df_base = _prepare_export_df(f_cidade, f_status, f_categoria, f_sites, nz_flag=("nz" in (f_valor_nzero or [])))
     ascending = (order == "asc")
     pdf_theme = "light"
 
-    # Gráficos baseados no df_base
     # Status
     if "status" in df_base and not df_base.empty:
         g1 = df_base["status"].astype(str).str.upper().value_counts().reset_index()
@@ -714,7 +824,7 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
         fig_cidades = px.bar(title="Top 10 Cidades")
     style_fig(fig_cidades, pdf_theme); fig_cidades.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
-    # Meses (Jul/Ago/Set) — com base nos dados brutos (export tem só média/saldos)
+    # Meses (Jul/Ago/Set) — com base nos dados brutos
     base_raw = _filtrar(load_data(), f_cidade, f_status, f_categoria, f_sites)
     base_raw = _merge_persisted_into_df(base_raw, _read_persisted_vals())
     vjul = float(base_raw.get("visualizacoes_julho", pd.Series(dtype=float)).sum())
@@ -773,7 +883,7 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
                 height_pt = width_pt * 9.0 / 16.0
                 return RLImage(BytesIO(img_bytes), width=width_pt, height=height_pt)
             except Exception as e:
-                print("[export_pdf] Falha ao renderizar gráfico com kaleido:", e)
+                _log("[export_pdf] Falha ao renderizar gráfico com kaleido:", e)
                 return None
 
         col_w = (avail_w - 6*mm) / 2.0
@@ -865,7 +975,6 @@ def recarregar_store(n, current_store):
     # re-sincroniza o store com o arquivo no disco (mantendo qualquer edição que já esteja no store)
     persisted = _read_persisted_vals()
     merged = {**(persisted or {}), **(current_store or {})}
-    # grava o merge (para garantir que não perdemos nada do store)
     _write_persisted_vals(merged)
     return merged
 
