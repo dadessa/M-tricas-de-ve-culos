@@ -333,6 +333,17 @@ app.layout = html.Div(className="light", id="root", children=[
                         {"if": {"column_id": "valor_planejado"}, "textAlign": "right"},
                         {"if": {"column_id": "valor_pago"}, "textAlign": "right"},
                         {"if": {"column_id": "saldo"}, "textAlign": "right"},
+                        # Destaque para status 'REPROVADO'
+                        {
+                            'if': {'filter_query': '{status} = "REPROVADO"'},
+                            'backgroundColor': '#FEE2E2', 'color': '#EF4444'
+                        },
+                    ],
+                    editable=True,
+                    # Define os tipos de dados para as colunas editáveis
+                    columns=[
+                        {"name": i, "id": i, "type": "numeric", "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")} if i in ["valor_planejado", "valor_pago"] else {"name": i, "id": i}
+                        for i in ["nome_do_veiculo","cidade","status","motivo","media_trimestral","valor_planejado","valor_pago","saldo"]
                     ],
                 ),
             ]),
@@ -341,8 +352,27 @@ app.layout = html.Div(className="light", id="root", children=[
 ])
 
 # ========= CALLBACKS / FILTRO =========
-def _filtrar(base: pd.DataFrame, cidade, status, categoria, sites) -> pd.DataFrame:
+def _filtrar(base: pd.DataFrame, cidade, status, categoria, sites, store_vals) -> pd.DataFrame:
     dff = base.copy()
+    # Aplica os valores persistidos do store_valores
+    store_vals = store_vals or {}
+    def _get_stored_value(row_name, key):
+        d = store_vals.get(row_name, {})
+        try:
+            return float(d.get(key, 0) or 0)
+        except Exception:
+            return 0.0
+
+    # Certifica-se de que as colunas existem antes de tentar aplicar os valores
+    if "valor_planejado" not in dff.columns:
+        dff["valor_planejado"] = 0.0
+    if "valor_pago" not in dff.columns:
+        dff["valor_pago"] = 0.0
+
+    dff["valor_planejado"] = dff.apply(lambda row: _get_stored_value(str(row["nome_do_veiculo"]), "valor_planejado"), axis=1)
+    dff["valor_pago"] = dff.apply(lambda row: _get_stored_value(str(row["nome_do_veiculo"]), "valor_pago"), axis=1)
+    dff["saldo"] = dff["valor_planejado"] - dff["valor_pago"]
+
     if cidade:    dff = dff[dff["cidade"].isin(cidade)]
     if status:    dff = dff[dff["status"].isin(status)]
     if categoria: dff = dff[dff["categoria"].isin(categoria)]
@@ -364,6 +394,373 @@ def set_theme(theme): return "light" if theme == "light" else "dark"
     Output("g_top_sites", "figure"),
     Output("tbl", "data"),
     Output("tbl", "columns"),
+    Input("f_cidade", "value"),
+    Input("f_status", "value"),
+    Input("f_categoria", "value"),
+    Input("f_sites", "value"),
+    Input("f_valor_nzero", "value"),
+    Input("sort-order", "value"),
+    Input("theme-toggle", "value"),
+    State("store_valores", "data"), # Adicionado State para store_valores
+)
+def update_all_outputs(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
+    dff = _filtrar(DF_BASE, f_cidade, f_status, f_categoria, f_sites, store_vals)
+
+    # Aplica filtro de valor diferente de zero
+    if f_valor_nzero and "nz" in f_valor_nzero:
+        dff = dff[(dff["valor_pago"].abs() > 0)]
+
+    # KPIs
+    total = len(dff)
+    aprov = len(dff[dff["status"] == "APROVADO"])
+    reprov = len(dff[dff["status"] == "REPROVADO"])
+    cidades_qtd = dff["cidade"].nunique()
+
+    ascending = (order == "asc")
+
+    # Gráfico de Status
+    if "status" in dff and not dff.empty:
+        g1 = dff["status"].astype(str).str.upper().value_counts().reset_index()
+        g1.columns = ["status", "qtd"]
+        g1 = g1.sort_values("qtd", ascending=ascending)
+        fig_status = px.bar(g1, x="status", y="qtd", text="qtd", title="Distribuição por Status", color="status",
+                            color_discrete_map={"APROVADO":"#22C55E","REPROVADO":"#EF4444","APROVADO PARCIAL":"#F59E0B","PENDENTE":"#A78BFA","INSTA":"#06B6D4"})
+        fig_status.update_traces(textposition="outside")
+        fig_status.update_layout(showlegend=True, xaxis=dict(categoryorder="array", categoryarray=g1["status"].tolist()))
+    else:
+        fig_status = px.bar(title="Distribuição por Status")
+    style_fig(fig_status, theme)
+
+    # Gráfico Top Cidades
+    if "cidade" in dff and not dff.empty:
+        base_cid = dff["cidade"].value_counts().reset_index()
+        base_cid.columns = ["cidade","qtd"]
+        base_cid = base_cid.sort_values("qtd", ascending=False).head(10)
+        base_cid = base_cid.sort_values("qtd", ascending=ascending)
+        seq = get_sequence(theme, len(base_cid))
+        fig_cidades = px.bar(base_cid, x="cidade", y="qtd", text="qtd", title="Top 10 Cidades", color="cidade", color_discrete_sequence=seq)
+        fig_cidades.update_traces(textposition="outside")
+        fig_cidades.update_layout(showlegend=False, xaxis=dict(categoryorder="array", categoryarray=base_cid["cidade"].tolist()))
+    else:
+        fig_cidades = px.bar(title="Top 10 Cidades")
+    style_fig(fig_cidades, theme)
+
+    # Gráfico de Visualizações por Mês
+    vjul = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    vago = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    vset = float(dff["visualizacoes_setembro"].sum()) if "visualizacoes_setembro" in dff else 0.0
+    g3 = pd.DataFrame({"Mês":["Julho","Agosto","Setembro"], "Visualizações":[vjul, vago, vset]}).sort_values("Visualizações", ascending=ascending)
+    seq3 = get_sequence(theme, len(g3))
+    fig_meses = px.bar(g3, x="Mês", y="Visualizações", text="Visualizações", title="Total de Visualizações por Mês (Jul/Ago/Set)",
+                       color="Mês", color_discrete_sequence=seq3)
+    fig_meses.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+    fig_meses.update_layout(showlegend=False, xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()))
+    style_fig(fig_meses, theme)
+
+    # Gráfico Top Sites por Média Trimestral
+    if {"nome_do_veiculo","media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_do_veiculo","media_trimestral"]]
+        g4 = g4.sort_values("media_trimestral", ascending=ascending)
+        seq4 = get_sequence(theme, len(g4))
+        fig_sites = px.bar(g4, x="media_trimestral", y="nome_do_veiculo", orientation="h", text="media_trimestral",
+                           title="Top 10 Sites (Média Trimestral Jul/Ago/Set)", color="nome_do_veiculo", color_discrete_sequence=seq4)
+        fig_sites.update_traces(texttemplate="%{text:.0f}")
+        fig_sites.update_layout(showlegend=False, yaxis=dict(categoryorder="array", categoryarray=g4["nome_do_veiculo"].tolist()),
+                                xaxis_title="Média Trimestral", yaxis_title="Site")
+    else:
+        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral Jul/Ago/Set)")
+    style_fig(fig_sites, theme)
+
+    # Tabela de Dados Detalhados
+    columns = [
+        {"name": "Nome do Veículo", "id": "nome_do_veiculo"},
+        {"name": "Cidade", "id": "cidade"},
+        {"name": "Status", "id": "status"},
+        {"name": "Motivo", "id": "motivo"},
+        {"name": "Média Trimestral", "id": "media_trimestral", "type": "numeric", "format": Format(precision=0, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")},
+        {"name": "Valor Planejado", "id": "valor_planejado", "type": "numeric", "editable": True, "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")},
+        {"name": "Valor Pago", "id": "valor_pago", "type": "numeric", "editable": True, "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")},
+        {"name": "Saldo", "id": "saldo", "type": "numeric", "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")},
+    ]
+    data = dff.to_dict('records')
+
+    return (f"{total}", f"{aprov}", f"{reprov}", f"{cidades_qtd}",
+            fig_status, fig_cidades, fig_meses, fig_sites, data, columns)
+
+# Persiste valores na sessão: valor_planejado e valor_pago
+@app.callback(
+    Output("store_valores", "data"),
+    Input("tbl", "data"), # Alterado para Input("tbl", "data") para capturar edições
+    State("store_valores", "data"),
+    prevent_initial_call=True
+)
+def persistir_valores(table_data, store_vals):
+    if not table_data:
+        return store_vals or {}
+    
+    updated_store_vals = store_vals or {}
+    for row in table_data:
+        nome = str(row.get("nome_do_veiculo", "")).strip()
+        if not nome:
+            continue
+        
+        # Atualiza apenas os valores que foram editados na tabela
+        current_planejado = float(row.get("valor_planejado", 0) or 0)
+        current_pago = float(row.get("valor_pago", 0) or 0)
+
+        # Se o nome do veículo já existe no store, atualiza. Caso contrário, adiciona.
+        if nome not in updated_store_vals:
+            updated_store_vals[nome] = {}
+        
+        updated_store_vals[nome]["valor_planejado"] = current_planejado
+        updated_store_vals[nome]["valor_pago"] = current_pago
+
+    return updated_store_vals
+
+# Atualiza opções dos filtros ao clicar em "Atualizar dados"
+@app.callback(
+    Output("f_cidade", "options"),
+    Output("f_status", "options"),
+    Output("f_categoria", "options"),
+    Output("f_sites", "options"),
+    Input("btn-reload", "n_clicks"),
+    prevent_initial_call=True
+)
+def refresh_filter_options(n):
+    d = load_data()
+    cidades = [{"label": c, "value": c} for c in sorted(d["cidade"].dropna().unique())] if "cidade" in d else []
+    status  = [{"label": s, "value": s} for s in sorted(d["status"].dropna().unique())] if "status" in d else []
+    cats    = [{"label": c, "value": c} for c in sorted(d["categoria"].dropna().unique())] if "categoria" in d else []
+    sites   = [{"label": n, "value": n} for n in sorted(d["nome_do_veiculo"].dropna().unique())] if "nome_do_veiculo" in d else []
+    return cidades, status, cats, sites
+
+# ========= EXPORTS =========
+def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites, store_vals, nz_flag) -> pd.DataFrame:
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites, store_vals)
+    if nz_flag:
+        dff = dff[(dff["valor_pago"].abs() > 0)]
+    cols_export = ["nome_do_veiculo","cidade","status","motivo",
+                   "media_trimestral","valor_planejado","valor_pago","saldo"]
+    return dff[[c for c in cols_export if c in dff.columns]].copy()
+
+@app.callback(
+    Output("download_excel", "data"),
+    Input("btn-export-excel", "n_clicks"),
+    State("f_cidade", "value"),
+    State("f_status", "value"),
+    State("f_categoria", "value"),
+    State("f_sites", "value"),
+    State("f_valor_nzero", "value"),
+    State("store_valores", "data"),
+    prevent_initial_call=True
+)
+def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, store_vals):
+    df = _filtered_df_for_export(
+        f_cidade, f_status, f_categoria, f_sites, store_vals, nz_flag=("nz" in (f_valor_nzero or []))
+    )
+    try:
+        return dcc.send_data_frame(df.to_excel, "metricas_de_veiculos.xlsx", sheet_name="Dados", index=False)
+    except Exception as e:
+        print("[export_excel] Falhou to_excel, fallback para CSV:", e)
+        return dcc.send_data_frame(df.to_csv, "metricas_de_veiculos.csv", index=False)
+
+# ---- PDF (gráficos + tabela com Planejado/Pago/Saldo)
+@app.callback(
+    Output("download_pdf", "data"),
+    Input("btn-export-pdf", "n_clicks"),
+    State("f_cidade", "value"),
+    State("f_status", "value"),
+    State("f_categoria", "value"),
+    State("f_sites", "value"),
+    State("f_valor_nzero", "value"),
+    State("sort-order", "value"),
+    State("theme-toggle", "value"),
+    State("store_valores", "data"),
+    prevent_initial_call=True
+)
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites, store_vals)
+
+    if f_valor_nzero and "nz" in f_valor_nzero:
+        dff = dff[(dff["valor_pago"].abs() > 0)]
+
+    ascending = (order == "asc")
+    pdf_theme = "light"
+
+    # Status
+    if "status" in dff and not dff.empty:
+        g1 = dff["status"].astype(str).str.upper().value_counts().reset_index()
+        g1.columns = ["status", "qtd"]
+        g1 = g1.sort_values("qtd", ascending=ascending)
+        fig_status = px.bar(g1, x="status", y="qtd", text="qtd", title="Distribuição por Status", color="status",
+                            color_discrete_map={"APROVADO":"#22C55E","REPROVADO":"#EF4444","APROVADO PARCIAL":"#F59E0B","PENDENTE":"#A78BFA","INSTA":"#06B6D4"})
+        fig_status.update_traces(textposition="outside")
+        fig_status.update_layout(showlegend=True, xaxis=dict(categoryorder="array", categoryarray=g1["status"].tolist()))
+    else:
+        fig_status = px.bar(title="Distribuição por Status")
+    style_fig(fig_status, pdf_theme); fig_status.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    # Top Cidades
+    if "cidade" in dff and not dff.empty:
+        base_cid = dff["cidade"].value_counts().reset_index()
+        base_cid.columns = ["cidade","qtd"]
+        base_cid = base_cid.sort_values("qtd", ascending=False).head(10)
+        base_cid = base_cid.sort_values("qtd", ascending=ascending)
+        seq = get_sequence(pdf_theme, len(base_cid))
+        fig_cidades = px.bar(base_cid, x="cidade", y="qtd", text="qtd", title="Top 10 Cidades", color="cidade", color_discrete_sequence=seq)
+        fig_cidades.update_traces(textposition="outside")
+        fig_cidades.update_layout(showlegend=False, xaxis=dict(categoryorder="array", categoryarray=base_cid["cidade"].tolist()))
+    else:
+        fig_cidades = px.bar(title="Top 10 Cidades")
+    style_fig(fig_cidades, pdf_theme); fig_cidades.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    # Meses (Jul/Ago/Set)
+    vjul = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    vago = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    vset = float(dff["visualizacoes_setembro"].sum()) if "visualizacoes_setembro" in dff else 0.0
+    g3 = pd.DataFrame({"Mês":["Julho","Agosto","Setembro"], "Visualizações":[vjul, vago, vset]}).sort_values("Visualizações", ascending=ascending)
+    seq3 = get_sequence(pdf_theme, len(g3))
+    fig_meses = px.bar(g3, x="Mês", y="Visualizações", text="Visualizações", title="Total de Visualizações por Mês (Jul/Ago/Set)",
+                       color="Mês", color_discrete_sequence=seq3)
+    fig_meses.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+    fig_meses.update_layout(showlegend=False, xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()))
+    style_fig(fig_meses, pdf_theme); fig_meses.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    # Top Sites por Média (Jul/Ago/Set)
+    if {"nome_do_veiculo","media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_do_veiculo","media_trimestral"]]
+        g4 = g4.sort_values("media_trimestral", ascending=ascending)
+        seq4 = get_sequence(pdf_theme, len(g4))
+        fig_sites = px.bar(g4, x="media_trimestral", y="nome_do_veiculo", orientation="h", text="media_trimestral",
+                           title="Top 10 Sites (Média Trimestral Jul/Ago/Set)", color="nome_do_veiculo", color_discrete_sequence=seq4)
+        fig_sites.update_traces(texttemplate="%{text:.0f}")
+        fig_sites.update_layout(showlegend=False, yaxis=dict(categoryorder="array", categoryarray=g4["nome_do_veiculo"].tolist()),
+                                xaxis_title="Média Trimestral", yaxis_title="Site")
+    else:
+        fig_sites = px.bar(title="Top 10 Sites (Média Trimestral Jul/Ago/Set)")
+    style_fig(fig_sites, pdf_theme); fig_sites.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+
+    figs = [fig_status, fig_cidades, fig_meses, fig_sites]
+
+    def _to_pdf(bytes_io):
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
+        from reportlab.lib.units import mm
+
+        page_size = landscape(A4)
+        left_margin = right_margin = top_margin = bottom_margin = 12 * mm
+        avail_w = page_size[0] - left_margin - right_margin
+
+        doc = SimpleDocTemplate(bytes_io, pagesize=page_size,
+                                leftMargin=left_margin, rightMargin=right_margin,
+                                topMargin=top_margin, bottomMargin=bottom_margin)
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("title", parent=styles["Heading2"], alignment=0, fontSize=14, leading=16, textColor=colors.HexColor("#111827"))
+        header_style = ParagraphStyle("header", parent=styles["Normal"], fontSize=9, textColor=colors.white)
+        cell_text = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8, leading=10)
+        cell_wrap = ParagraphStyle("cell_wrap", parent=cell_text, wordWrap="CJK")
+
+        story = [Paragraph("Métricas de Veículos — Relatório", title_style), Spacer(1, 6)]
+
+        def fig_to_rlimage(fig, width_pt):
+            try:
+                img_bytes = pio.to_image(fig, format="png", scale=2)  # requer kaleido
+                height_pt = width_pt * 9.0 / 16.0
+                return RLImage(BytesIO(img_bytes), width=width_pt, height=height_pt)
+            except Exception as e:
+                print("[export_pdf] Falha ao renderizar gráfico com kaleido:", e)
+                return None
+
+        col_w = (avail_w - 6*mm) / 2.0
+        row_imgs = []
+        for i, fig in enumerate(figs):
+            rlimg = fig_to_rlimage(fig, col_w)
+            row_imgs.append(rlimg or Paragraph("**Gráfico indisponível (kaleido ausente)**", cell_text))
+            if (i % 2 == 1) or (i == len(figs)-1):
+                t = Table([[row_imgs[0]] + ([row_imgs[1]] if len(row_imgs) > 1 else [])],
+                          colWidths=[col_w, col_w] if len(row_imgs) > 1 else [col_w])
+                t.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),
+                                       ("LEFTPADDING",(0,0),(-1,-1),0),
+                                       ("RIGHTPADDING",(0,0),(-1,-1),0),
+                                       ("TOPPADDING",(0,0),(-1,-1),0),
+                                       ("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+                story += [t, Spacer(1, 8)]
+                row_imgs = []
+
+        labels = {
+            "nome_do_veiculo":"Nome do Veículo","cidade":"Cidade","status":"Status",
+            "motivo":"Motivo","media_trimestral":"Média Trimestral",
+            "valor_planejado":"Valor Planejado","valor_pago":"Valor Pago","saldo":"Saldo"
+        }
+        col_keys = [c for c in ["nome_do_veiculo","cidade","status","motivo",
+                                "media_trimestral","valor_planejado","valor_pago","saldo"] if c in dff.columns]
+        headers = [labels[k] for k in col_keys]
+        data = [[Paragraph(h, header_style) for h in headers]]
+
+        def fmt_int(x):
+            try: return str(f"{int(round(float(x))):,}").replace(",", ".")
+            except: return str(x)
+        def fmt_money(x):
+            try:
+                s = f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                return s
+            except:
+                return str(x)
+
+        for _, row in dff[col_keys].iterrows():
+            line = []
+            for k in col_keys:
+                v = row[k]
+                if k == "media_trimestral":
+                    line.append(Paragraph(fmt_int(v), cell_text))
+                elif k in ["valor_planejado", "valor_pago", "saldo"]:
+                    line.append(Paragraph(fmt_money(v), cell_text))
+                elif k in ["nome_do_veiculo","motivo"]:
+                    line.append(Paragraph(str(v), cell_wrap))
+                else:
+                    line.append(Paragraph(str(v), cell_text))
+            data.append(line)
+
+        weights = {"nome_do_veiculo":3.2,"cidade":1.2,"status":1.1,"motivo":3.2,
+                   "media_trimestral":1.4,"valor_planejado":1.5,"valor_pago":1.5,"saldo":1.5}
+        wlist = [weights.get(k,1.0) for k in col_keys]
+        col_widths = [(w/sum(wlist))*avail_w for w in wlist]
+
+        tbl = Table(data, colWidths=col_widths, repeatRows=1); tbl.splitByRow = 1
+        styles_tbl = [
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("ALIGN",(0,0),(-1,0),"CENTER"),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("GRID",(0,0),(-1,-1),0.25,colors.HexColor("#D1D5DB")),
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke, colors.HexColor("#F8FAFC")]),
+            ("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),
+            ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
+        ]
+        # alinhamento numérico
+        for idx, k in enumerate(col_keys):
+            if k in ["media_trimestral","valor_planejado","valor_pago","saldo"]:
+                styles_tbl.append(("ALIGN",(idx,1),(idx,-1),"RIGHT"))
+        tbl.setStyle(TableStyle(styles_tbl))
+        story += [Spacer(1,4), tbl]
+        doc.build(story)
+
+    return dcc.send_bytes(_to_pdf, "metricas_de_veiculos.pdf")
+
+# RUN
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8050))
+    try:
+        app.run(debug=True, host="0.0.0.0", port=port)
+    except AttributeError:
+        app.run_server(debug=True, host="0.0.0.0", port=port)
+umns"),
     Input("f_cidade", "value"),
     Input("f_status", "value"),
     Input("f_categoria", "value"),
@@ -506,30 +903,32 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
 # Persiste valores na sessão: valor_planejado e valor_pago
 @app.callback(
     Output("store_valores", "data"),
-    Input("tbl", "data_timestamp"),
-    State("tbl", "data"),
+    Input("tbl", "data"), # Alterado para Input("tbl", "data") para capturar edições
     State("store_valores", "data"),
     prevent_initial_call=True
 )
-def persistir_valores(_, table_data, store_vals):
-    store_vals = store_vals or {}
+def persistir_valores(table_data, store_vals):
     if not table_data:
-        return store_vals
+        return store_vals or {}
+    
+    updated_store_vals = store_vals or {}
     for row in table_data:
         nome = str(row.get("nome_do_veiculo", "")).strip()
         if not nome:
             continue
-        d = store_vals.get(nome, {})
-        try:
-            d["valor_planejado"] = float(row.get("valor_planejado", 0) or 0)
-        except Exception:
-            d["valor_planejado"] = 0.0
-        try:
-            d["valor_pago"] = float(row.get("valor_pago", 0) or 0)
-        except Exception:
-            d["valor_pago"] = 0.0
-        store_vals[nome] = d
-    return store_vals
+        
+        # Atualiza apenas os valores que foram editados na tabela
+        current_planejado = float(row.get("valor_planejado", 0) or 0)
+        current_pago = float(row.get("valor_pago", 0) or 0)
+
+        # Se o nome do veículo já existe no store, atualiza. Caso contrário, adiciona.
+        if nome not in updated_store_vals:
+            updated_store_vals[nome] = {}
+        
+        updated_store_vals[nome]["valor_planejado"] = current_planejado
+        updated_store_vals[nome]["valor_pago"] = current_pago
+
+    return updated_store_vals
 
 # Atualiza opções dos filtros ao clicar em "Atualizar dados"
 @app.callback(
@@ -551,17 +950,7 @@ def refresh_filter_options(n):
 # ========= EXPORTS =========
 def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites, store_vals, nz_flag) -> pd.DataFrame:
     base = load_data()
-    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
-    store_vals = store_vals or {}
-    def _get(nome, key):
-        d = store_vals.get(nome, {})
-        try:
-            return float(d.get(key, 0) or 0)
-        except Exception:
-            return 0.0
-    dff["valor_planejado"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_planejado"))
-    dff["valor_pago"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_pago"))
-    dff["saldo"] = dff["valor_planejado"] - dff["valor_pago"]
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites, store_vals)
     if nz_flag:
         dff = dff[(dff["valor_pago"].abs() > 0)]
     cols_export = ["nome_do_veiculo","cidade","status","motivo",
@@ -605,17 +994,7 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, s
 )
 def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
     base = load_data()
-    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
-    store_vals = store_vals or {}
-    def _get(nome, key):
-        d = store_vals.get(nome, {})
-        try:
-            return float(d.get(key, 0) or 0)
-        except Exception:
-            return 0.0
-    dff["valor_planejado"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_planejado"))
-    dff["valor_pago"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_pago"))
-    dff["saldo"] = dff["valor_planejado"] - dff["valor_pago"]
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites, store_vals)
 
     if f_valor_nzero and "nz" in f_valor_nzero:
         dff = dff[(dff["valor_pago"].abs() > 0)]
