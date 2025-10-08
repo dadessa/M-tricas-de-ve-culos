@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v4.1)
-- Correções na leitura da planilha (CSV/Google Sheets/Excel)
-- read_csv com autodetecção de separador (sep=None, engine="python", utf-8-sig)
-- Fallbacks para Excel (openpyxl / outros) e também para CSV local
-- Restante: persistência de valores Planejado/Pago, filtros, gráficos e export
+Métricas de Veículos (v4.2)
+- Correção para voltar a EXIBIR os dados da planilha (Google Sheets CSV e/ou arquivo local)
+- Leitura robusta de CSV (sep autodetect, utf-8-sig) e Excel (openpyxl + fallbacks)
+- Normalização de colunas e mapeamento inteligente (nome do veículo, views Jul/Ago/Set, etc.)
+- Persistência de valores Planejado/Pago (JSON) que permanecem após atualizar a página
+- Filtro "Somente Valor Pago ≠ 0"
+- Tabela contínua e exports (Excel/PDF)
 """
 
 import os
@@ -42,9 +44,9 @@ def _normalize(colname: str) -> str:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)
-    s = s.str.replace(",", ".", regex=False)
-    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)              # remove não numéricos
+    s = s.str.replace(",", ".", regex=False)                       # vírgula->ponto
+    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)  # ponto milhar
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
 def _find_first(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
@@ -70,7 +72,7 @@ def _resolve_views(df: pd.DataFrame, mes: str) -> Optional[str]:
     for a in base_aliases:
         hit = _find_by_tokens(df, [a, mes])
         if hit: return hit
-    abrevs = {"julho":["jul"], "agosto":["ago"], "setembro":["set","sep"]}.get(mes, [])
+    abrevs = {"julho": ["jul"], "agosto": ["ago"], "setembro": ["set", "sep"]}.get(mes, [])
     for ab in abrevs:
         for a in base_aliases:
             hit = _find_by_tokens(df, [a, ab])
@@ -121,6 +123,42 @@ def _merge_persisted_into_df(df: pd.DataFrame, persisted: dict) -> pd.DataFrame:
     return df
 
 # ========= CARREGAMENTO DE DADOS =========
+def _read_csv_robusto(path_or_url: str) -> pd.DataFrame:
+    """
+    CSV robusto (Google Sheets ou local):
+    - Autodetecção de separador (sep=None, engine="python")
+    - UTF-8 com BOM (utf-8-sig)
+    - dtype=str para evitar inferência errada
+    """
+    return pd.read_csv(
+        path_or_url,
+        sep=None,
+        engine="python",
+        encoding="utf-8-sig",
+        dtype=str,
+        na_filter=False
+    )
+
+def _read_excel_robusto(path: str) -> pd.DataFrame:
+    """
+    Excel robusto:
+    - openpyxl primeiro; se falhar, tenta genericamente; se ainda falhar, tenta CSV local.
+    """
+    try:
+        return pd.read_excel(path, engine="openpyxl", dtype=str)
+    except Exception as e1:
+        print("[load_data] Falhou openpyxl:", e1)
+        try:
+            return pd.read_excel(path, dtype=str)
+        except Exception as e2:
+            print("[load_data] Falhou read_excel genérico:", e2)
+            try:
+                print("[load_data] Tentando ler como CSV local…")
+                return _read_csv_robusto(path)
+            except Exception as e3:
+                print("[load_data] Falhou ler como CSV local também:", e3)
+                raise
+
 def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     original_cols = list(df.columns)
@@ -150,9 +188,9 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         df["status"] = df["status"].astype(str).str.upper()
 
     # Motivo
-    motivo_aliases = ["motivo", "motivo_da_reprovacao", "motivo_de_reprovacao",
-                      "motivo_reprovacao", "motivo_reprova", "motivo_reprov"]
-    mot = _find_first(df, motivo_aliases) or _find_by_tokens(df, ["motivo", "reprov"])
+    mot_alias = ["motivo", "motivo_da_reprovacao", "motivo_de_reprovacao",
+                 "motivo_reprovacao", "motivo_reprova", "motivo_reprov"]
+    mot = _find_first(df, mot_alias) or _find_by_tokens(df, ["motivo", "reprov"])
     if mot and mot != "motivo":
         df["motivo"] = df[mot].astype(str)
     elif "motivo" not in df.columns:
@@ -177,42 +215,6 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-def _read_csv_robusto(path_or_url: str) -> pd.DataFrame:
-    """
-    Leitura robusta de CSV (Google Sheets ou local):
-    - autodetecção de separador
-    - encoding 'utf-8-sig' para BOM
-    - dtype=str para evitar inferência errada
-    """
-    return pd.read_csv(
-        path_or_url,
-        sep=None,
-        engine="python",
-        encoding="utf-8-sig",
-        dtype=str,
-        na_filter=False
-    )
-
-def _read_excel_robusto(path: str) -> pd.DataFrame:
-    """
-    Tenta ler Excel com openpyxl; se falhar, tenta sem engine; se ainda falhar e for CSV, tenta CSV.
-    Tudo como texto (dtype=str) para preservar dados.
-    """
-    try:
-        return pd.read_excel(path, engine="openpyxl", dtype=str)
-    except Exception as e1:
-        print("[load_data] Falhou openpyxl:", e1)
-        try:
-            return pd.read_excel(path, dtype=str)
-        except Exception as e2:
-            print("[load_data] Falhou read_excel genérico:", e2)
-            try:
-                print("[load_data] Tentando ler como CSV local…")
-                return _read_csv_robusto(path)
-            except Exception as e3:
-                print("[load_data] Falhou ler como CSV local também:", e3)
-                raise
-
 def load_data() -> pd.DataFrame:
     # 1) Google Sheets CSV (se definido)
     if SHEETS_CSV_URL:
@@ -220,7 +222,7 @@ def load_data() -> pd.DataFrame:
             url = _url_with_cache_bust(SHEETS_CSV_URL)
             raw = _read_csv_robusto(url)
             print("[load_data] Sheets OK. Linhas:", len(raw), "Colunas originais:", list(raw.columns))
-            if len(raw) == 0 or raw.shape[1] == 0:
+            if raw.empty or raw.shape[1] == 0:
                 print("[load_data] AVISO: Sheets retornou vazio.")
             return _prepare_df(raw)
         except Exception as e:
@@ -230,7 +232,7 @@ def load_data() -> pd.DataFrame:
     try:
         base = _read_excel_robusto(EXCEL_PATH)
         print("[load_data] Arquivo local OK. Linhas:", len(base), "Colunas originais:", list(base.columns))
-        if len(base) == 0 or base.shape[1] == 0:
+        if base.empty or base.shape[1] == 0:
             print("[load_data] AVISO: Arquivo local vazio.")
         return _prepare_df(base)
     except Exception as e:
@@ -305,7 +307,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v4.1", className="badge"),
+                html.Span("v4.2", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -521,9 +523,9 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
     style_fig(fig_cidades, theme)
 
     # Visualizações por mês (Jul/Ago/Set)
-    vjul = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
-    vago = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
-    vset = float(dff["visualizacoes_setembro"].sum()) if "visualizacoes_setembro" in dff else 0.0
+    vjul = float(dff.get("visualizacoes_julho", pd.Series(dtype=float)).sum())
+    vago = float(dff.get("visualizacoes_agosto", pd.Series(dtype=float)).sum())
+    vset = float(dff.get("visualizacoes_setembro", pd.Series(dtype=float)).sum())
     g3 = pd.DataFrame({"Mês": ["Julho", "Agosto", "Setembro"], "Visualizações": [vjul, vago, vset]}).sort_values(
         "Visualizações", ascending=ascending
     )
@@ -832,9 +834,9 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
         wlist = [weights.get(k,1.0) for k in col_keys]
         col_widths = [(w/sum(wlist))*avail_w for w in wlist]
 
-        from reportlab.lib import colors
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.platypus import Table, TableStyle
         tbl = Table(data, colWidths=col_widths, repeatRows=1); tbl.splitByRow = 1
+        from reportlab.lib import colors
         styles_tbl = [
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),
             ("TEXTCOLOR",(0,0),(-1,0),colors.white),
