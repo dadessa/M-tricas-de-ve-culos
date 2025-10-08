@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v4.2)
-- Correção para voltar a EXIBIR os dados da planilha (Google Sheets CSV e/ou arquivo local)
-- Leitura robusta de CSV (sep autodetect, utf-8-sig) e Excel (openpyxl + fallbacks)
-- Normalização de colunas e mapeamento inteligente (nome do veículo, views Jul/Ago/Set, etc.)
-- Persistência de valores Planejado/Pago (JSON) que permanecem após atualizar a página
-- Filtro "Somente Valor Pago ≠ 0"
-- Tabela contínua e exports (Excel/PDF)
+Métricas de Veículos (v3.7)
+- 'Nome do Veículo' como Dropdown multi-seleção (f_sites)
+- Colunas financeiras: Valor Planejado (editável), Valor Pago (editável), Saldo (= Planejado - Pago)
+- Filtro 'Somente Valor ≠ 0' considera Valor Pago
+- Meses Jul/Ago/Set + Média Trimestral; Top 10 por Média
+- Tabela contínua (sem paginação)
+- Exportar Excel/CSV e PDF incluem Planejado/Pago/Saldo
+- Correção de SyntaxError (string não terminada em style_cell_conditional)
 """
 
 import os
-import json
 import time
 import unicodedata
 from io import BytesIO
-from typing import Optional
 
 import pandas as pd
 import plotly.express as px
@@ -23,16 +22,15 @@ from dash import Dash, dcc, html, dash_table
 from dash import Input, Output, State
 from dash.dash_table.Format import Format, Group, Scheme
 
-# ========= CONFIG =========
-EXCEL_PATH = os.getenv("EXCEL_PATH", "Recadastramento (respostas).xlsx")  # fallback local
-SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")                              # CSV público (Google Sheets)
-VALORES_JSON_PATH = os.getenv("VALORES_JSON_PATH", "valores_financeiros.json")
+# ========= FONTE DE DADOS =========
+EXCEL_PATH = "Recadastramento (respostas).xlsx"   # fallback local (dev)
+SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL")      # defina no Render (CSV público)
 
-# ========= UTILS =========
 def _url_with_cache_bust(url: str) -> str:
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}_t={int(time.time())}"
 
+# ========= HELPERS =========
 def _normalize(colname: str) -> str:
     s = str(colname).strip().replace("\n", " ")
     s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("utf-8")
@@ -44,24 +42,24 @@ def _normalize(colname: str) -> str:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     s = series.astype(str)
-    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)              # remove não numéricos
-    s = s.str.replace(",", ".", regex=False)                       # vírgula->ponto
-    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)  # ponto milhar
+    s = s.str.replace(r"[^0-9\-,\.]", "", regex=True)
+    s = s.str.replace(",", ".", regex=False)
+    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:\.|$))", "", regex=True)
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
-def _find_first(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
+def _find_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
     for c in candidates:
         if c in df.columns:
             return c
     return None
 
-def _find_by_tokens(df: pd.DataFrame, tokens: list[str]) -> Optional[str]:
+def _find_by_tokens(df: pd.DataFrame, tokens: list[str]) -> str | None:
     for c in df.columns:
         if all(tok in c for tok in tokens):
             return c
     return None
 
-def _resolve_views(df: pd.DataFrame, mes: str) -> Optional[str]:
+def _resolve_views(df: pd.DataFrame, mes: str) -> str | None:
     base_aliases = ["visualizacoes", "vizualizacoes", "views", "pageviews", "page_views", "pageview"]
     aliases = [f"visualizacoes_{mes}", f"vizualizacoes_{mes}",
                f"total_de_visualizacoes_{mes}", f"total_de_vizualizacoes_{mes}"]
@@ -72,92 +70,12 @@ def _resolve_views(df: pd.DataFrame, mes: str) -> Optional[str]:
     for a in base_aliases:
         hit = _find_by_tokens(df, [a, mes])
         if hit: return hit
-    abrevs = {"julho": ["jul"], "agosto": ["ago"], "setembro": ["set", "sep"]}.get(mes, [])
-    for ab in abrevs:
+    abrevs_map = {"julho": ["jul"], "agosto": ["ago"], "setembro": ["set", "sep"]}
+    for ab in abrevs_map.get(mes, []):
         for a in base_aliases:
             hit = _find_by_tokens(df, [a, ab])
             if hit: return hit
     return None
-
-# ========= PERSISTÊNCIA EM JSON =========
-def _safe_dir_for(path: str):
-    d = os.path.dirname(os.path.abspath(path))
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
-
-def _read_persisted_vals() -> dict:
-    p = VALORES_JSON_PATH
-    try:
-        if not os.path.exists(p):
-            return {}
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception as e:
-        print("[persist] Falha ao ler JSON:", e)
-        return {}
-
-def _write_persisted_vals(data: dict) -> None:
-    p = VALORES_JSON_PATH
-    try:
-        _safe_dir_for(p)
-        tmp = f"{p}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, p)
-    except Exception as e:
-        print("[persist] Falha ao escrever JSON:", e)
-
-def _merge_persisted_into_df(df: pd.DataFrame, persisted: dict) -> pd.DataFrame:
-    df = df.copy()
-    def _get(nome, key):
-        try:
-            return float(persisted.get(str(nome), {}).get(key, 0) or 0)
-        except Exception:
-            return 0.0
-    df["valor_planejado"] = df["nome_do_veiculo"].apply(lambda n: _get(n, "valor_planejado"))
-    df["valor_pago"]      = df["nome_do_veiculo"].apply(lambda n: _get(n, "valor_pago"))
-    df["saldo"] = df["valor_planejado"] - df["valor_pago"]
-    return df
-
-# ========= CARREGAMENTO DE DADOS =========
-def _read_csv_robusto(path_or_url: str) -> pd.DataFrame:
-    """
-    CSV robusto (Google Sheets ou local):
-    - Autodetecção de separador (sep=None, engine="python")
-    - UTF-8 com BOM (utf-8-sig)
-    - dtype=str para evitar inferência errada
-    """
-    return pd.read_csv(
-        path_or_url,
-        sep=None,
-        engine="python",
-        encoding="utf-8-sig",
-        dtype=str,
-        na_filter=False
-    )
-
-def _read_excel_robusto(path: str) -> pd.DataFrame:
-    """
-    Excel robusto:
-    - openpyxl primeiro; se falhar, tenta genericamente; se ainda falhar, tenta CSV local.
-    """
-    try:
-        return pd.read_excel(path, engine="openpyxl", dtype=str)
-    except Exception as e1:
-        print("[load_data] Falhou openpyxl:", e1)
-        try:
-            return pd.read_excel(path, dtype=str)
-        except Exception as e2:
-            print("[load_data] Falhou read_excel genérico:", e2)
-            try:
-                print("[load_data] Tentando ler como CSV local…")
-                return _read_csv_robusto(path)
-            except Exception as e3:
-                print("[load_data] Falhou ler como CSV local também:", e3)
-                raise
 
 def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -188,9 +106,9 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
         df["status"] = df["status"].astype(str).str.upper()
 
     # Motivo
-    mot_alias = ["motivo", "motivo_da_reprovacao", "motivo_de_reprovacao",
-                 "motivo_reprovacao", "motivo_reprova", "motivo_reprov"]
-    mot = _find_first(df, mot_alias) or _find_by_tokens(df, ["motivo", "reprov"])
+    motivo_aliases = ["motivo", "motivo_da_reprovacao", "motivo_de_reprovacao",
+                      "motivo_reprovacao", "motivo_reprova", "motivo_reprov"]
+    mot = _find_first(df, motivo_aliases) or _find_by_tokens(df, ["motivo", "reprov"])
     if mot and mot != "motivo":
         df["motivo"] = df[mot].astype(str)
     elif "motivo" not in df.columns:
@@ -216,28 +134,20 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def load_data() -> pd.DataFrame:
-    # 1) Google Sheets CSV (se definido)
     if SHEETS_CSV_URL:
         try:
             url = _url_with_cache_bust(SHEETS_CSV_URL)
-            raw = _read_csv_robusto(url)
+            raw = pd.read_csv(url)
             print("[load_data] Sheets OK. Linhas:", len(raw), "Colunas originais:", list(raw.columns))
-            if raw.empty or raw.shape[1] == 0:
-                print("[load_data] AVISO: Sheets retornou vazio.")
             return _prepare_df(raw)
         except Exception as e:
             print("[load_data] Falha lendo SHEETS_CSV_URL:", e)
-
-    # 2) Excel local (ou CSV local por fallback)
     try:
-        base = _read_excel_robusto(EXCEL_PATH)
-        print("[load_data] Arquivo local OK. Linhas:", len(base), "Colunas originais:", list(base.columns))
-        if base.empty or base.shape[1] == 0:
-            print("[load_data] AVISO: Arquivo local vazio.")
+        base = pd.read_excel(EXCEL_PATH)
+        print("[load_data] Excel local OK. Linhas:", len(base))
         return _prepare_df(base)
     except Exception as e:
-        print("[load_data] Excel/CSV local indisponível:", e)
-        # 3) estrutura vazia porém compatível
+        print("[load_data] Excel local indisponível e Sheets falhou:", e)
         cols = [
             "nome_fantasia","nome_do_veiculo","cidade","status","motivo","categoria",
             "visualizacoes_julho","visualizacoes_agosto","visualizacoes_setembro",
@@ -300,14 +210,15 @@ def kpi_card(kpi_id: str, label: str):
 
 # claro por padrão
 app.layout = html.Div(className="light", id="root", children=[
-    dcc.Store(id="store_valores", storage_type="session", data=_read_persisted_vals()),
+    # Armazenamento na sessão: {nome: {"valor_planejado": float, "valor_pago": float}}
+    dcc.Store(id="store_valores", storage_type="session"),
     html.Div(className="container", children=[
         # Navbar
         html.Div(className="navbar", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v4.2", className="badge"),
+                html.Span("v3.7", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -361,10 +272,10 @@ app.layout = html.Div(className="light", id="root", children=[
                     ),
                 ]),
                 html.Div(children=[
-                    html.Div("Filtro de Valor Pago", className="label"),
+                    html.Div("Filtro de Valor", className="label"),
                     dcc.Checklist(
                         id="f_valor_nzero",
-                        options=[{"label": "Somente Valor Pago ≠ 0", "value": "nz"}],
+                        options=[{"label": "Somente Valor ≠ 0", "value": "nz"}],
                         value=[],
                         inline=True,
                         inputStyle={"marginRight":"6px","marginLeft":"10px"},
@@ -400,7 +311,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="card", children=[dcc.Graph(id="g_top_sites", config={"displayModeBar": False})]),
         ]),
 
-        # Tabela contínua
+        # Tabela (lista contínua)
         html.Div(className="panel", children=[
             html.Div("Dados detalhados", className="label"),
             html.Div(className="card", children=[
@@ -429,7 +340,7 @@ app.layout = html.Div(className="light", id="root", children=[
     ]),
 ])
 
-# ========= FILTRO =========
+# ========= CALLBACKS / FILTRO =========
 def _filtrar(base: pd.DataFrame, cidade, status, categoria, sites) -> pd.DataFrame:
     dff = base.copy()
     if cidade:    dff = dff[dff["cidade"].isin(cidade)]
@@ -441,7 +352,7 @@ def _filtrar(base: pd.DataFrame, cidade, status, categoria, sites) -> pd.DataFra
 @app.callback(Output("root", "className"), Input("theme-toggle", "value"))
 def set_theme(theme): return "light" if theme == "light" else "dark"
 
-# ========= KPI, GRÁFICOS e TABELA =========
+# Atualiza KPI/Gráficos/Tabela
 @app.callback(
     Output("kpi_total", "children"),
     Output("kpi_aprov", "children"),
@@ -465,17 +376,23 @@ def set_theme(theme): return "light" if theme == "light" else "dark"
 )
 def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_reload, theme, store_vals):
     base = load_data() if (n_reload and n_reload > 0) else DF_BASE
-
-    # Mescla o que está salvo em disco com o store do navegador (store vence)
-    file_vals = _read_persisted_vals()
-    store_vals = store_vals or {}
-    persisted = {**file_vals, **store_vals}
-
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
-    dff = _merge_persisted_into_df(dff, persisted)
     ascending = (order == "asc")
 
-    # filtro: Somente Valor Pago ≠ 0
+    # aplica valores persistidos
+    store_vals = store_vals or {}
+    def _get(nome, key):
+        d = store_vals.get(nome, {})
+        try:
+            return float(d.get(key, 0) or 0)
+        except Exception:
+            return 0.0
+
+    dff["valor_planejado"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_planejado"))
+    dff["valor_pago"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_pago"))
+    dff["saldo"] = dff["valor_planejado"] - dff["valor_pago"]
+
+    # filtro: Somente Valor ≠ 0 (considera Valor Pago)
     if f_valor_nzero and "nz" in f_valor_nzero:
         dff = dff[(dff["valor_pago"].abs() > 0)]
 
@@ -523,9 +440,9 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
     style_fig(fig_cidades, theme)
 
     # Visualizações por mês (Jul/Ago/Set)
-    vjul = float(dff.get("visualizacoes_julho", pd.Series(dtype=float)).sum())
-    vago = float(dff.get("visualizacoes_agosto", pd.Series(dtype=float)).sum())
-    vset = float(dff.get("visualizacoes_setembro", pd.Series(dtype=float)).sum())
+    vjul = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    vago = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    vset = float(dff["visualizacoes_setembro"].sum()) if "visualizacoes_setembro" in dff else 0.0
     g3 = pd.DataFrame({"Mês": ["Julho", "Agosto", "Setembro"], "Visualizações": [vjul, vago, vset]}).sort_values(
         "Visualizações", ascending=ascending
     )
@@ -540,7 +457,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
                             xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()))
     style_fig(fig_meses, theme)
 
-    # Top sites — média_trimestral
+    # Top sites — média_trimestral (Jul/Ago/Set)
     if {"nome_fantasia","media_trimestral"}.issubset(dff.columns) and not dff.empty:
         g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia","media_trimestral"]]
         g4 = g4.sort_values("media_trimestral", ascending=ascending)
@@ -586,7 +503,7 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
     return (f"{total}", f"{aprov}", f"{reprov}", f"{cidades_qtd}",
             fig_status, fig_cidades, fig_meses, fig_sites, data, columns)
 
-# ========= PERSISTIR EDIÇÕES =========
+# Persiste valores na sessão: valor_planejado e valor_pago
 @app.callback(
     Output("store_valores", "data"),
     Input("tbl", "data_timestamp"),
@@ -595,60 +512,56 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
     prevent_initial_call=True
 )
 def persistir_valores(_, table_data, store_vals):
-    file_vals = _read_persisted_vals()
     store_vals = store_vals or {}
-    merged = {**file_vals, **store_vals}
+    if not table_data:
+        return store_vals
+    for row in table_data:
+        nome = str(row.get("nome_do_veiculo", "")).strip()
+        if not nome:
+            continue
+        d = store_vals.get(nome, {})
+        try:
+            d["valor_planejado"] = float(row.get("valor_planejado", 0) or 0)
+        except Exception:
+            d["valor_planejado"] = 0.0
+        try:
+            d["valor_pago"] = float(row.get("valor_pago", 0) or 0)
+        except Exception:
+            d["valor_pago"] = 0.0
+        store_vals[nome] = d
+    return store_vals
 
-    if table_data:
-        for row in table_data:
-            nome = str(row.get("nome_do_veiculo", "")).strip()
-            if not nome:
-                continue
-            entry = merged.get(nome, {})
-            try:
-                entry["valor_planejado"] = float(row.get("valor_planejado", entry.get("valor_planejado", 0)) or 0)
-            except Exception:
-                entry["valor_planejado"] = float(entry.get("valor_planejado", 0) or 0)
-            try:
-                entry["valor_pago"] = float(row.get("valor_pago", entry.get("valor_pago", 0)) or 0)
-            except Exception:
-                entry["valor_pago"] = float(entry.get("valor_pago", 0) or 0)
-            merged[nome] = entry
-
-        _write_persisted_vals(merged)
-
-    return merged
-
-# ========= ATUALIZAR DADOS / RECARREGAR PERSISTÊNCIA =========
+# Atualiza opções dos filtros ao clicar em "Atualizar dados"
 @app.callback(
     Output("f_cidade", "options"),
     Output("f_status", "options"),
     Output("f_categoria", "options"),
     Output("f_sites", "options"),
-    Output("store_valores", "data"),
     Input("btn-reload", "n_clicks"),
-    State("store_valores", "data"),
     prevent_initial_call=True
 )
-def refresh_filter_options(n, current_store):
+def refresh_filter_options(n):
     d = load_data()
     cidades = [{"label": c, "value": c} for c in sorted(d["cidade"].dropna().unique())] if "cidade" in d else []
     status  = [{"label": s, "value": s} for s in sorted(d["status"].dropna().unique())] if "status" in d else []
     cats    = [{"label": c, "value": c} for c in sorted(d["categoria"].dropna().unique())] if "categoria" in d else []
     sites   = [{"label": n, "value": n} for n in sorted(d["nome_do_veiculo"].dropna().unique())] if "nome_do_veiculo" in d else []
-
-    file_vals = _read_persisted_vals()
-    merged = {**(file_vals or {}), **(current_store or {})}
-    _write_persisted_vals(merged)
-
-    return cidades, status, cats, sites, merged
+    return cidades, status, cats, sites
 
 # ========= EXPORTS =========
-def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites, nz_flag) -> pd.DataFrame:
+def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites, store_vals, nz_flag) -> pd.DataFrame:
     base = load_data()
-    persisted = _read_persisted_vals()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
-    dff = _merge_persisted_into_df(dff, persisted)
+    store_vals = store_vals or {}
+    def _get(nome, key):
+        d = store_vals.get(nome, {})
+        try:
+            return float(d.get(key, 0) or 0)
+        except Exception:
+            return 0.0
+    dff["valor_planejado"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_planejado"))
+    dff["valor_pago"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_pago"))
+    dff["saldo"] = dff["valor_planejado"] - dff["valor_pago"]
     if nz_flag:
         dff = dff[(dff["valor_pago"].abs() > 0)]
     cols_export = ["nome_do_veiculo","cidade","status","motivo",
@@ -663,11 +576,12 @@ def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites, nz_flag) -
     State("f_categoria", "value"),
     State("f_sites", "value"),
     State("f_valor_nzero", "value"),
+    State("store_valores", "data"),
     prevent_initial_call=True
 )
-def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero):
+def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, store_vals):
     df = _filtered_df_for_export(
-        f_cidade, f_status, f_categoria, f_sites, nz_flag=("nz" in (f_valor_nzero or []))
+        f_cidade, f_status, f_categoria, f_sites, store_vals, nz_flag=("nz" in (f_valor_nzero or []))
     )
     try:
         return dcc.send_data_frame(df.to_excel, "metricas_de_veiculos.xlsx", sheet_name="Dados", index=False)
@@ -675,7 +589,7 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero):
         print("[export_excel] Falhou to_excel, fallback para CSV:", e)
         return dcc.send_data_frame(df.to_csv, "metricas_de_veiculos.csv", index=False)
 
-# ---- PDF
+# ---- PDF (gráficos + tabela com Planejado/Pago/Saldo)
 @app.callback(
     Output("download_pdf", "data"),
     Input("btn-export-pdf", "n_clicks"),
@@ -686,16 +600,30 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero):
     State("f_valor_nzero", "value"),
     State("sort-order", "value"),
     State("theme-toggle", "value"),
+    State("store_valores", "data"),
     prevent_initial_call=True
 )
-def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme):
-    dff = _filtered_df_for_export(
-        f_cidade, f_status, f_categoria, f_sites, nz_flag=("nz" in (f_valor_nzero or []))
-    )
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
+    base = load_data()
+    dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
+    store_vals = store_vals or {}
+    def _get(nome, key):
+        d = store_vals.get(nome, {})
+        try:
+            return float(d.get(key, 0) or 0)
+        except Exception:
+            return 0.0
+    dff["valor_planejado"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_planejado"))
+    dff["valor_pago"] = dff["nome_do_veiculo"].apply(lambda n: _get(str(n), "valor_pago"))
+    dff["saldo"] = dff["valor_planejado"] - dff["valor_pago"]
+
+    if f_valor_nzero and "nz" in f_valor_nzero:
+        dff = dff[(dff["valor_pago"].abs() > 0)]
+
     ascending = (order == "asc")
     pdf_theme = "light"
 
-    # Gráficos
+    # Status
     if "status" in dff and not dff.empty:
         g1 = dff["status"].astype(str).str.upper().value_counts().reset_index()
         g1.columns = ["status", "qtd"]
@@ -708,6 +636,7 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
         fig_status = px.bar(title="Distribuição por Status")
     style_fig(fig_status, pdf_theme); fig_status.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
+    # Top Cidades
     if "cidade" in dff and not dff.empty:
         base_cid = dff["cidade"].value_counts().reset_index()
         base_cid.columns = ["cidade","qtd"]
@@ -721,9 +650,10 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
         fig_cidades = px.bar(title="Top 10 Cidades")
     style_fig(fig_cidades, pdf_theme); fig_cidades.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
-    vjul = float(dff.get("visualizacoes_julho", pd.Series(dtype=float)).sum())
-    vago = float(dff.get("visualizacoes_agosto", pd.Series(dtype=float)).sum())
-    vset = float(dff.get("visualizacoes_setembro", pd.Series(dtype=float)).sum())
+    # Meses (Jul/Ago/Set)
+    vjul = float(dff["visualizacoes_julho"].sum()) if "visualizacoes_julho" in dff else 0.0
+    vago = float(dff["visualizacoes_agosto"].sum()) if "visualizacoes_agosto" in dff else 0.0
+    vset = float(dff["visualizacoes_setembro"].sum()) if "visualizacoes_setembro" in dff else 0.0
     g3 = pd.DataFrame({"Mês":["Julho","Agosto","Setembro"], "Visualizações":[vjul, vago, vset]}).sort_values("Visualizações", ascending=ascending)
     seq3 = get_sequence(pdf_theme, len(g3))
     fig_meses = px.bar(g3, x="Mês", y="Visualizações", text="Visualizações", title="Total de Visualizações por Mês (Jul/Ago/Set)",
@@ -732,14 +662,15 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
     fig_meses.update_layout(showlegend=False, xaxis=dict(categoryorder="array", categoryarray=g3["Mês"].tolist()))
     style_fig(fig_meses, pdf_theme); fig_meses.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
 
-    if {"nome_do_veiculo","media_trimestral"}.issubset(dff.columns) and not dff.empty:
-        g4 = dff.nlargest(10, "media_trimestral")[["nome_do_veiculo","media_trimestral"]]
+    # Top Sites por Média (Jul/Ago/Set)
+    if {"nome_fantasia","media_trimestral"}.issubset(dff.columns) and not dff.empty:
+        g4 = dff.nlargest(10, "media_trimestral")[["nome_fantasia","media_trimestral"]]
         g4 = g4.sort_values("media_trimestral", ascending=ascending)
         seq4 = get_sequence(pdf_theme, len(g4))
-        fig_sites = px.bar(g4, x="media_trimestral", y="nome_do_veiculo", orientation="h", text="media_trimestral",
-                           title="Top 10 Sites (Média Trimestral Jul/Ago/Set)", color="nome_do_veiculo", color_discrete_sequence=seq4)
+        fig_sites = px.bar(g4, x="media_trimestral", y="nome_fantasia", orientation="h", text="media_trimestral",
+                           title="Top 10 Sites (Média Trimestral Jul/Ago/Set)", color="nome_fantasia", color_discrete_sequence=seq4)
         fig_sites.update_traces(texttemplate="%{text:.0f}")
-        fig_sites.update_layout(showlegend=False, yaxis=dict(categoryorder="array", categoryarray=g4["nome_do_veiculo"].tolist()),
+        fig_sites.update_layout(showlegend=False, yaxis=dict(categoryorder="array", categoryarray=g4["nome_fantasia"].tolist()),
                                 xaxis_title="Média Trimestral", yaxis_title="Site")
     else:
         fig_sites = px.bar(title="Top 10 Sites (Média Trimestral Jul/Ago/Set)")
@@ -834,9 +765,7 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
         wlist = [weights.get(k,1.0) for k in col_keys]
         col_widths = [(w/sum(wlist))*avail_w for w in wlist]
 
-        from reportlab.platypus import Table, TableStyle
         tbl = Table(data, colWidths=col_widths, repeatRows=1); tbl.splitByRow = 1
-        from reportlab.lib import colors
         styles_tbl = [
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),
             ("TEXTCOLOR",(0,0),(-1,0),colors.white),
@@ -848,6 +777,7 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
             ("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),
             ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
         ]
+        # alinhamento numérico
         for idx, k in enumerate(col_keys):
             if k in ["media_trimestral","valor_planejado","valor_pago","saldo"]:
                 styles_tbl.append(("ALIGN",(idx,1),(idx,-1),"RIGHT"))
