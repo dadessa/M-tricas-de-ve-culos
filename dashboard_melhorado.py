@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Métricas de Veículos (v4.0)
-- Editar e SALVAR valores (Planejado/Pago) em disco, permanecendo após atualizar a página
-- Persistência via JSON no servidor (VALORES_JSON_PATH)
-- Filtro "Somente Valor Pago ≠ 0"
-- Média Trimestral (Jul/Ago/Set) e Top 10 por Média
-- Tabela contínua (sem paginação) e exports (Excel/PDF)
+Métricas de Veículos (v4.1)
+- Correções na leitura da planilha (CSV/Google Sheets/Excel)
+- read_csv com autodetecção de separador (sep=None, engine="python", utf-8-sig)
+- Fallbacks para Excel (openpyxl / outros) e também para CSV local
+- Restante: persistência de valores Planejado/Pago, filtros, gráficos e export
 """
 
 import os
@@ -85,7 +84,6 @@ def _safe_dir_for(path: str):
         os.makedirs(d, exist_ok=True)
 
 def _read_persisted_vals() -> dict:
-    """Lê JSON persistido; formato: {nome_do_veiculo: {valor_planejado: float, valor_pago: float}}"""
     p = VALORES_JSON_PATH
     try:
         if not os.path.exists(p):
@@ -98,7 +96,6 @@ def _read_persisted_vals() -> dict:
         return {}
 
 def _write_persisted_vals(data: dict) -> None:
-    """Escrita atômica: arquivo temporário + replace."""
     p = VALORES_JSON_PATH
     try:
         _safe_dir_for(p)
@@ -180,21 +177,65 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def _read_csv_robusto(path_or_url: str) -> pd.DataFrame:
+    """
+    Leitura robusta de CSV (Google Sheets ou local):
+    - autodetecção de separador
+    - encoding 'utf-8-sig' para BOM
+    - dtype=str para evitar inferência errada
+    """
+    return pd.read_csv(
+        path_or_url,
+        sep=None,
+        engine="python",
+        encoding="utf-8-sig",
+        dtype=str,
+        na_filter=False
+    )
+
+def _read_excel_robusto(path: str) -> pd.DataFrame:
+    """
+    Tenta ler Excel com openpyxl; se falhar, tenta sem engine; se ainda falhar e for CSV, tenta CSV.
+    Tudo como texto (dtype=str) para preservar dados.
+    """
+    try:
+        return pd.read_excel(path, engine="openpyxl", dtype=str)
+    except Exception as e1:
+        print("[load_data] Falhou openpyxl:", e1)
+        try:
+            return pd.read_excel(path, dtype=str)
+        except Exception as e2:
+            print("[load_data] Falhou read_excel genérico:", e2)
+            try:
+                print("[load_data] Tentando ler como CSV local…")
+                return _read_csv_robusto(path)
+            except Exception as e3:
+                print("[load_data] Falhou ler como CSV local também:", e3)
+                raise
+
 def load_data() -> pd.DataFrame:
+    # 1) Google Sheets CSV (se definido)
     if SHEETS_CSV_URL:
         try:
             url = _url_with_cache_bust(SHEETS_CSV_URL)
-            raw = pd.read_csv(url)
+            raw = _read_csv_robusto(url)
             print("[load_data] Sheets OK. Linhas:", len(raw), "Colunas originais:", list(raw.columns))
+            if len(raw) == 0 or raw.shape[1] == 0:
+                print("[load_data] AVISO: Sheets retornou vazio.")
             return _prepare_df(raw)
         except Exception as e:
             print("[load_data] Falha lendo SHEETS_CSV_URL:", e)
+
+    # 2) Excel local (ou CSV local por fallback)
     try:
-        base = pd.read_excel(EXCEL_PATH)
-        print("[load_data] Excel local OK. Linhas:", len(base))
+        base = _read_excel_robusto(EXCEL_PATH)
+        print("[load_data] Arquivo local OK. Linhas:", len(base), "Colunas originais:", list(base.columns))
+        if len(base) == 0 or base.shape[1] == 0:
+            print("[load_data] AVISO: Arquivo local vazio.")
         return _prepare_df(base)
     except Exception as e:
-        print("[load_data] Excel local indisponível e Sheets falhou:", e)
+        print("[load_data] Excel/CSV local indisponível:", e)
+        # 3) estrutura vazia porém compatível
         cols = [
             "nome_fantasia","nome_do_veiculo","cidade","status","motivo","categoria",
             "visualizacoes_julho","visualizacoes_agosto","visualizacoes_setembro",
@@ -257,7 +298,6 @@ def kpi_card(kpi_id: str, label: str):
 
 # claro por padrão
 app.layout = html.Div(className="light", id="root", children=[
-    # Store da sessão inicializado com o que estiver no JSON do servidor
     dcc.Store(id="store_valores", storage_type="session", data=_read_persisted_vals()),
     html.Div(className="container", children=[
         # Navbar
@@ -265,7 +305,7 @@ app.layout = html.Div(className="light", id="root", children=[
             html.Div(className="brand", children=[
                 html.Div("📊", style={"fontSize": "20px"}),
                 html.H1("Métricas de Veículos"),
-                html.Span("v4.0", className="badge"),
+                html.Span("v4.1", className="badge"),
             ]),
             html.Div(className="actions", children=[
                 dcc.RadioItems(
@@ -424,7 +464,7 @@ def set_theme(theme): return "light" if theme == "light" else "dark"
 def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_reload, theme, store_vals):
     base = load_data() if (n_reload and n_reload > 0) else DF_BASE
 
-    # Mescla o que está salvo em disco com o que estiver no store do navegador (store vence)
+    # Mescla o que está salvo em disco com o store do navegador (store vence)
     file_vals = _read_persisted_vals()
     store_vals = store_vals or {}
     persisted = {**file_vals, **store_vals}
@@ -547,16 +587,12 @@ def atualizar(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, n_
 # ========= PERSISTIR EDIÇÕES =========
 @app.callback(
     Output("store_valores", "data"),
-    Input("tbl", "data_timestamp"),         # dispara quando edita a tabela
+    Input("tbl", "data_timestamp"),
     State("tbl", "data"),
     State("store_valores", "data"),
     prevent_initial_call=True
 )
 def persistir_valores(_, table_data, store_vals):
-    """
-    Mescla as edições com o que está em disco e SALVA no JSON.
-    Assim, mesmo após atualizar a página, os valores permanecem.
-    """
     file_vals = _read_persisted_vals()
     store_vals = store_vals or {}
     merged = {**file_vals, **store_vals}
@@ -577,9 +613,9 @@ def persistir_valores(_, table_data, store_vals):
                 entry["valor_pago"] = float(entry.get("valor_pago", 0) or 0)
             merged[nome] = entry
 
-        _write_persisted_vals(merged)  # FIXA em disco
+        _write_persisted_vals(merged)
 
-    return merged  # atualiza o Store também
+    return merged
 
 # ========= ATUALIZAR DADOS / RECARREGAR PERSISTÊNCIA =========
 @app.callback(
@@ -593,10 +629,6 @@ def persistir_valores(_, table_data, store_vals):
     prevent_initial_call=True
 )
 def refresh_filter_options(n, current_store):
-    """
-    Ao clicar 'Atualizar dados', recarrega a base e SINCRONIZA o store com o JSON,
-    garantindo que os valores editados continuem após atualizar a página.
-    """
     d = load_data()
     cidades = [{"label": c, "value": c} for c in sorted(d["cidade"].dropna().unique())] if "cidade" in d else []
     status  = [{"label": s, "value": s} for s in sorted(d["status"].dropna().unique())] if "status" in d else []
@@ -605,14 +637,14 @@ def refresh_filter_options(n, current_store):
 
     file_vals = _read_persisted_vals()
     merged = {**(file_vals or {}), **(current_store or {})}
-    _write_persisted_vals(merged)  # mantém disco e store alinhados
+    _write_persisted_vals(merged)
 
     return cidades, status, cats, sites, merged
 
 # ========= EXPORTS =========
 def _filtered_df_for_export(f_cidade, f_status, f_categoria, f_sites, nz_flag) -> pd.DataFrame:
     base = load_data()
-    persisted = _read_persisted_vals()  # garante pegar o que está salvo em disco
+    persisted = _read_persisted_vals()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites)
     dff = _merge_persisted_into_df(dff, persisted)
     if nz_flag:
@@ -800,6 +832,8 @@ def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, ord
         wlist = [weights.get(k,1.0) for k in col_keys]
         col_widths = [(w/sum(wlist))*avail_w for w in wlist]
 
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
         tbl = Table(data, colWidths=col_widths, repeatRows=1); tbl.splitByRow = 1
         styles_tbl = [
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),
