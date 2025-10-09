@@ -275,7 +275,7 @@ app.layout = html.Div(className="light", id="root", children=[
                     html.Div("Filtro de Valor", className="label"),
                     dcc.Checklist(
                         id="f_valor_nzero",
-                        options=[{"label": "Somente Valor ≠ 0", "value": "nz"}],
+                        options=[{"label": "Somente Valor Pago ≠ 0", "value": "nz"}],
                         value=[],
                         inline=True,
                         inputStyle={"marginRight":"6px","marginLeft":"10px"},
