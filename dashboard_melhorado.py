@@ -577,14 +577,24 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, s
     State("sort-order", "value"),
     State("theme-toggle", "value"),
     State("store_valores", "data"),
+    State("tbl", "sort_by"), # Adicionado para capturar a ordenação da tabela
     prevent_initial_call=True
 )
-def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals, sort_by):
     base = load_data()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites, store_vals)
 
     if f_valor_nzero and "nz" in f_valor_nzero:
         dff = dff[(dff["valor_pago"].abs() > 0)]
+
+    # Aplicar ordenação da tabela, se houver
+    if sort_by:
+        sort_columns = [col["column_id"] for col in sort_by]
+        sort_directions = [True if col["direction"] == "asc" else False for col in sort_by]
+        # Certificar-se de que as colunas de ordenação existem no DataFrame
+        existing_sort_columns = [col for col in sort_columns if col in dff.columns]
+        if existing_sort_columns:
+            dff = dff.sort_values(by=existing_sort_columns, ascending=sort_directions[:len(existing_sort_columns)])
 
     ascending = (order == "asc")
     pdf_theme = "light"
@@ -990,14 +1000,24 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, s
     State("sort-order", "value"),
     State("theme-toggle", "value"),
     State("store_valores", "data"),
+    State("tbl", "sort_by"), # Adicionado para capturar a ordenação da tabela
     prevent_initial_call=True
 )
-def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals, sort_by):
     base = load_data()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites, store_vals)
 
     if f_valor_nzero and "nz" in f_valor_nzero:
         dff = dff[(dff["valor_pago"].abs() > 0)]
+
+    # Aplicar ordenação da tabela, se houver
+    if sort_by:
+        sort_columns = [col["column_id"] for col in sort_by]
+        sort_directions = [True if col["direction"] == "asc" else False for col in sort_by]
+        # Certificar-se de que as colunas de ordenação existem no DataFrame
+        existing_sort_columns = [col for col in sort_columns if col in dff.columns]
+        if existing_sort_columns:
+            dff = dff.sort_values(by=existing_sort_columns, ascending=sort_directions[:len(existing_sort_columns)])
 
     ascending = (order == "asc")
     pdf_theme = "light"
