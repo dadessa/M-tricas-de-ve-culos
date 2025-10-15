@@ -760,7 +760,7 @@ if __name__ == "__main__":
         app.run(debug=True, host="0.0.0.0", port=port)
     except AttributeError:
         app.run_server(debug=True, host="0.0.0.0", port=port)
-
+umns"),
     Input("f_cidade", "value"),
     Input("f_status", "value"),
     Input("f_categoria", "value"),
