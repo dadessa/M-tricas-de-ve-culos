@@ -352,7 +352,7 @@ app.layout = html.Div(className="light", id="root", children=[
 ])
 
 # ========= CALLBACKS / FILTRO =========
-def _filtrar(base: pd.DataFrame, cidade, status, categoria, sites, store_vals) -> pd.DataFrame: 
+def _filtrar(base: pd.DataFrame, cidade, status, categoria, sites, store_vals) -> pd.DataFrame:
     dff = base.copy()
     # Aplica os valores persistidos do store_valores
     store_vals = store_vals or {}
@@ -402,23 +402,13 @@ def set_theme(theme): return "light" if theme == "light" else "dark"
     Input("sort-order", "value"),
     Input("theme-toggle", "value"),
     State("store_valores", "data"), # Adicionado State para store_valores
-    State("tbl", "sort_by"), # Adicionado para capturar a ordenação da tabela
 )
-def update_all_outputs(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals, sort_by):
+def update_all_outputs(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
     dff = _filtrar(DF_BASE, f_cidade, f_status, f_categoria, f_sites, store_vals)
 
     # Aplica filtro de valor diferente de zero
     if f_valor_nzero and "nz" in f_valor_nzero:
         dff = dff[(dff["valor_pago"].abs() > 0)]
-
-    # Aplicar ordenação da tabela, se houver
-    if sort_by:
-        sort_columns = [col["column_id"] for col in sort_by]
-        sort_directions = [True if col["direction"] == "asc" else False for col in sort_by]
-        # Certificar-se de que as colunas de ordenação existem no DataFrame
-        existing_sort_columns = [col for col in sort_columns if col in dff.columns]
-        if existing_sort_columns:
-            dff = dff.sort_values(by=existing_sort_columns, ascending=sort_directions[:len(existing_sort_columns)])
 
     # KPIs
     total = len(dff)
@@ -482,22 +472,17 @@ def update_all_outputs(f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, 
     style_fig(fig_sites, theme)
 
     # Tabela de Dados Detalhados
-    # Tabela de Dados Detalhados
-    # Define as colunas dinamicamente com base no dff, mas mantém a formatação e editabilidade
-    columns = []
-    for col in ["nome_do_veiculo","cidade","status","motivo","media_trimestral","valor_planejado","valor_pago","saldo"]:
-        if col in dff.columns:
-            col_def = {"name": col.replace("_", " ").title(), "id": col}
-            if col in ["media_trimestral", "valor_planejado", "valor_pago", "saldo"]:
-                col_def["type"] = "numeric"
-                col_def["format"] = Format(precision=2, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")
-                if col == "media_trimestral": # Média trimestral não é editável e tem 0 casas decimais
-                    col_def["format"] = Format(precision=0, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")
-            if col in ["valor_planejado", "valor_pago"]:
-                col_def["editable"] = True
-            columns.append(col_def)
-
-    data = dff.to_dict("records")
+    columns = [
+        {"name": "Nome do Veículo", "id": "nome_do_veiculo"},
+        {"name": "Cidade", "id": "cidade"},
+        {"name": "Status", "id": "status"},
+        {"name": "Motivo", "id": "motivo"},
+        {"name": "Média Trimestral", "id": "media_trimestral", "type": "numeric", "format": Format(precision=0, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")},
+        {"name": "Valor Planejado", "id": "valor_planejado", "type": "numeric", "editable": True, "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")},
+        {"name": "Valor Pago", "id": "valor_pago", "type": "numeric", "editable": True, "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")},
+        {"name": "Saldo", "id": "saldo", "type": "numeric", "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, groups=3, group_delimiter=".", decimal_delimiter=",")},
+    ]
+    data = dff.to_dict('records')
 
     return (f"{total}", f"{aprov}", f"{reprov}", f"{cidades_qtd}",
             fig_status, fig_cidades, fig_meses, fig_sites, data, columns)
@@ -592,24 +577,14 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, s
     State("sort-order", "value"),
     State("theme-toggle", "value"),
     State("store_valores", "data"),
-    State("tbl", "sort_by"), # Adicionado para capturar a ordenação da tabela
     prevent_initial_call=True
 )
-def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals, sort_by):
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
     base = load_data()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites, store_vals)
 
     if f_valor_nzero and "nz" in f_valor_nzero:
         dff = dff[(dff["valor_pago"].abs() > 0)]
-
-    # Aplicar ordenação da tabela, se houver
-    if sort_by:
-        sort_columns = [col["column_id"] for col in sort_by]
-        sort_directions = [True if col["direction"] == "asc" else False for col in sort_by]
-        # Certificar-se de que as colunas de ordenação existem no DataFrame
-        existing_sort_columns = [col for col in sort_columns if col in dff.columns]
-        if existing_sort_columns:
-            dff = dff.sort_values(by=existing_sort_columns, ascending=sort_directions[:len(existing_sort_columns)])
 
     ascending = (order == "asc")
     pdf_theme = "light"
@@ -1015,24 +990,14 @@ def exportar_excel(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, s
     State("sort-order", "value"),
     State("theme-toggle", "value"),
     State("store_valores", "data"),
-    State("tbl", "sort_by"), # Adicionado para capturar a ordenação da tabela
     prevent_initial_call=True
 )
-def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals, sort_by):
+def exportar_pdf(n, f_cidade, f_status, f_categoria, f_sites, f_valor_nzero, order, theme, store_vals):
     base = load_data()
     dff = _filtrar(base, f_cidade, f_status, f_categoria, f_sites, store_vals)
 
     if f_valor_nzero and "nz" in f_valor_nzero:
         dff = dff[(dff["valor_pago"].abs() > 0)]
-
-    # Aplicar ordenação da tabela, se houver
-    if sort_by:
-        sort_columns = [col["column_id"] for col in sort_by]
-        sort_directions = [True if col["direction"] == "asc" else False for col in sort_by]
-        # Certificar-se de que as colunas de ordenação existem no DataFrame
-        existing_sort_columns = [col for col in sort_columns if col in dff.columns]
-        if existing_sort_columns:
-            dff = dff.sort_values(by=existing_sort_columns, ascending=sort_directions[:len(existing_sort_columns)])
 
     ascending = (order == "asc")
     pdf_theme = "light"
