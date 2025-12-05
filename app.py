@@ -1,232 +1,297 @@
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import dash
-from dash import dcc, html, dash_table
-from dash.dependencies import Input, Output
-import numpy as np
-from flask import Flask
+from flask import Flask, jsonify, render_template, request
+import requests
+import json
+import csv
+import io
+import os
+from datetime import datetime
 
-# Carregar os dados
-df = pd.read_excel('/home/ubuntu/upload/Recadastramento(respostas)(2).xlsx')
+app = Flask(__name__)
 
-# Renomear colunas para facilitar o uso
-df.columns = [
-    'timestamp', 'nome_fantasia', 'razao_social', 'cnpj', 'endereco', 
-    'telefone_empresa', 'email_comercial', 'responsavel_tecnico', 'url', 
-    'relatorio_analytics', 'declaracao_veracidade', 'acesso_analytics', 
-    'modalidade_site', 'telefone_responsavel', 'email_responsavel', 
-    'nome_social', 'cidade', 'expediente', 'cookies', 'endereco_site', 
-    'visualizacoes_junho', 'visualizacoes_julho', 'visualizacoes_agosto', 
-    'categoria', 'modalidade', 'google_analytics', 'propriedade', 'status'
+# Configurar CORS manualmente
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
+
+# URLs do Google Sheets (múltiplas tentativas)
+GOOGLE_SHEETS_URLS = [
+    "https://docs.google.com/spreadsheets/d/17TnGB6NpsziDec4fPH-d0TCQwk2LN0BAv6yjmIpyZnI/export?format=csv&gid=1225239898",
+    "https://docs.google.com/spreadsheets/d/17TnGB6NpsziDec4fPH-d0TCQwk2LN0BAv6yjmIpyZnI/export?format=csv",
+    "https://docs.google.com/spreadsheets/d/17TnGB6NpsziDec4fPH-d0TCQwk2LN0BAv6yjmIpyZnI/gviz/tq?tqx=out:csv&gid=1225239898"
 ]
 
-# Limpeza e preparação dos dados
-def clean_numeric_column(col):
-    """Limpa colunas numéricas convertendo strings para números"""
-    if col.dtype == 'object':
-        # Remove caracteres não numéricos e converte para float
-        return pd.to_numeric(col.astype(str).str.replace(r'[^\d.]', '', regex=True), errors='coerce').fillna(0)
-    return col
-# Ajuste de nomes para o que o resto do código espera
-df = df.rename(columns={
-    'total_de_vizualizacoes_junho':  'visualizacoes_junho',
-    'total_de_vizualizacoes_julho':  'visualizacoes_julho',
-    'total_de_vizualizacoes_agosto': 'visualizacoes_agosto',
-    'nome_do_veiculo.': 'nome_fantasia',
-    'nome_empresarial_da_empresa_responsavel.': 'razao_social',
-    'endereco_no_site': 'endereco_site'
-})
-
-# Aplicar limpeza nas colunas de visualizações
-df['visualizacoes_junho'] = clean_numeric_column(df['visualizacoes_junho'])
-df['visualizacoes_julho'] = clean_numeric_column(df['visualizacoes_julho'])
-df['visualizacoes_agosto'] = clean_numeric_column(df['visualizacoes_agosto'])
-
-# Calcular total de visualizações
-df['total_visualizacoes'] = df['visualizacoes_junho'] + df['visualizacoes_julho'] + df['visualizacoes_agosto']
-
-# Remover valores nulos das colunas de filtro
-df['cidade'] = df['cidade'].fillna('Não informado')
-df['categoria'] = df['categoria'].fillna('Não informado')
-df['status'] = df['status'].fillna('Não informado')
-
-# Criar aplicativo Flask
-server = Flask(__name__)
-
-# Inicializar o aplicativo Dash
-external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
-app = dash.Dash(__name__, server=server, external_stylesheets=external_stylesheets)
-
-# Layout do dashboard
-app.layout = html.Div([
-    html.Div([
-        html.H1('Dashboard de Análise de Sites - Recadastramento', 
-                style={'textAlign': 'center', 'color': '#2c3e50', 'marginBottom': 30})
-    ]),
+def clean_numeric_value(value):
+    """Limpa e converte valores numéricos"""
+    if not value or str(value).lower() in ['não tem analytics', 'n/a', 'nan', '']:
+        return 'N/A'
     
-    # Seção de filtros
-    html.Div([
-        html.H3('Filtros', style={'color': '#34495e'}),
-        html.Div([
-            html.Div([
-                html.Label('Cidade:', style={'fontWeight': 'bold'}),
-                dcc.Dropdown(
-                    id='filtro-cidade',
-                    options=[{'label': i, 'value': i} for i in sorted(df['cidade'].unique()) if pd.notna(i)],
-                    multi=True,
-                    placeholder='Selecione as cidades...',
-                    style={'marginBottom': 10}
-                )
-            ], className='four columns'),
+    # Converter para string e limpar
+    str_value = str(value).strip()
+    
+    # Remover caracteres não numéricos exceto pontos e vírgulas
+    import re
+    cleaned = re.sub(r'[^\d.,]', '', str_value)
+    
+    # Substituir vírgulas por pontos
+    cleaned = cleaned.replace(',', '.')
+    
+    try:
+        # Tentar converter para float e depois para int se for número inteiro
+        num_value = float(cleaned)
+        if num_value.is_integer():
+            return int(num_value)
+        return num_value
+    except:
+        return 'N/A'
+
+def load_data_from_local_csv():
+    """Carrega dados do arquivo CSV local"""
+    try:
+        csv_path = os.path.join(os.path.dirname(__file__), 'Recadastramento(respostas)-CADASTROS(2).csv')
+        
+        if not os.path.exists(csv_path):
+            print(f"Arquivo CSV não encontrado: {csv_path}")
+            return []
+        
+        data = []
+        with open(csv_path, 'r', encoding='utf-8') as file:
+            reader = csv.DictReader(file)
             
-            html.Div([
-                html.Label('Categoria:', style={'fontWeight': 'bold'}),
-                dcc.Dropdown(
-                    id='filtro-categoria',
-                    options=[{'label': i, 'value': i} for i in sorted(df['categoria'].unique()) if pd.notna(i)],
-                    multi=True,
-                    placeholder='Selecione as categorias...',
-                    style={'marginBottom': 10}
-                )
-            ], className='four columns'),
-            
-            html.Div([
-                html.Label('Status:', style={'fontWeight': 'bold'}),
-                dcc.Dropdown(
-                    id='filtro-status',
-                    options=[{'label': i, 'value': i} for i in sorted(df['status'].unique()) if pd.notna(i)],
-                    multi=True,
-                    placeholder='Selecione os status...',
-                    style={'marginBottom': 10}
-                )
-            ], className='four columns')
-        ], className='row', style={'marginBottom': 20})
-    ], style={'backgroundColor': '#ecf0f1', 'padding': 20, 'marginBottom': 20}),
-    
-    # Seção de métricas principais
-    html.Div(id='metricas-principais', style={'marginBottom': 20}),
-    
-    # Seção de gráficos
-    html.Div([
-        html.Div([
-            dcc.Graph(id='grafico-visualizacoes-mes')
-        ], className='six columns'),
+            for row in reader:
+                # Mapear colunas para nomes mais limpos
+                clean_row = {}
+                
+                # Nome do veículo
+                nome_col = 'Nome do veículo.\n'
+                if nome_col in row:
+                    clean_row['Nome do veículo'] = row[nome_col] or 'N/A'
+                else:
+                    clean_row['Nome do veículo'] = 'N/A'
+                
+                # Outras colunas
+                clean_row['Cidade'] = row.get('Cidade', 'N/A')
+                clean_row['Status'] = row.get('Status', 'N/A')
+                clean_row['Categoria'] = row.get('Categoria', 'N/A')
+                clean_row['Cookies'] = row.get('Cookies', 'N/A')
+                clean_row['Expediente'] = row.get('Expediente', 'N/A')
+                clean_row['Endereço'] = row.get('Endereço no site', 'N/A')
+                clean_row['Analytics'] = row.get('Google analytics ', 'N/A')
+                
+                # Views com limpeza numérica
+                clean_row['Views Set'] = clean_numeric_value(row.get('Views Setembro', '0'))
+                clean_row['Views Out'] = clean_numeric_value(row.get('Views Outubro', '0'))
+                clean_row['Views Nov'] = clean_numeric_value(row.get('Views Novembro', '0'))
+                clean_row['Média Trimestral'] = clean_numeric_value(row.get('Média Trimestral', '0'))
+                clean_row['Views Ago'] = clean_numeric_value(row.get('Views Novembro', '0'))  # Usando Nov como Ago
+                
+                # Só adicionar se tiver nome válido
+                if clean_row['Nome do veículo'] != 'N/A' and clean_row['Nome do veículo'].strip():
+                    data.append(clean_row)
         
-        html.Div([
-            dcc.Graph(id='grafico-sites-por-cidade')
-        ], className='six columns')
-    ], className='row'),
-    
-    html.Div([
-        html.Div([
-            dcc.Graph(id='grafico-categoria-status')
-        ], className='six columns'),
+        print(f"Dados carregados do CSV local: {len(data)} registros")
+        return data
         
-        html.Div([
-            dcc.Graph(id='grafico-top-sites')
-        ], className='six columns')
-    ], className='row'),
-    
-    # Tabela de dados
-    html.Div([
-        html.H3('Dados Detalhados', style={'color': '#34495e'}),
-        html.Div(id='tabela-dados')
-    ], style={'marginTop': 30})
-])
+    except Exception as e:
+        print(f"Erro ao carregar CSV local: {e}")
+        return []
 
-# Callbacks para atualizar os componentes
-@app.callback(
-    [Output('metricas-principais', 'children'),
-     Output('grafico-visualizacoes-mes', 'figure'),
-     Output('grafico-sites-por-cidade', 'figure'),
-     Output('grafico-categoria-status', 'figure'),
-     Output('grafico-top-sites', 'figure'),
-     Output('tabela-dados', 'children')],
-    [Input('filtro-cidade', 'value'),
-     Input('filtro-categoria', 'value'),
-     Input('filtro-status', 'value')]
-)
-def update_dashboard(cidades_selecionadas, categorias_selecionadas, status_selecionado):
-    # Filtrar dados
-    dff = df.copy()
+def load_data_from_sheets():
+    """Carrega dados diretamente do Google Sheets com múltiplas tentativas"""
     
-    if cidades_selecionadas:
-        dff = dff[dff['cidade'].isin(cidades_selecionadas)]
-    if categorias_selecionadas:
-        dff = dff[dff['categoria'].isin(categorias_selecionadas)]
-    if status_selecionado:
-        dff = dff[dff['status'].isin(status_selecionado)]
+    # Primeiro tentar carregar do Google Sheets
+    for url in GOOGLE_SHEETS_URLS:
+        try:
+            print(f"Tentando carregar dados do Google Sheets: {url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(url, timeout=15, headers=headers, allow_redirects=True)
+            
+            if response.status_code == 200 and response.text.strip():
+                # Verificar se é HTML (erro) ou CSV
+                if response.text.strip().startswith('<'):
+                    print(f"Resposta HTML recebida (erro de acesso): {url}")
+                    continue
+                
+                # Tentar processar como CSV
+                csv_data = response.text
+                reader = csv.DictReader(io.StringIO(csv_data))
+                
+                data = []
+                for row in reader:
+                    # Mapear colunas para nomes mais limpos
+                    clean_row = {}
+                    
+                    # Nome do veículo (tentar diferentes variações)
+                    nome_options = ['Nome do veículo.\n', 'Nome do veículo', 'Nome']
+                    nome_value = 'N/A'
+                    for nome_col in nome_options:
+                        if nome_col in row and row[nome_col]:
+                            nome_value = row[nome_col]
+                            break
+                    clean_row['Nome do veículo'] = nome_value
+                    
+                    # Outras colunas
+                    clean_row['Cidade'] = row.get('Cidade', 'N/A')
+                    clean_row['Status'] = row.get('Status', 'N/A')
+                    clean_row['Categoria'] = row.get('Categoria', 'N/A')
+                    clean_row['Cookies'] = row.get('Cookies', 'N/A')
+                    clean_row['Expediente'] = row.get('Expediente', 'N/A')
+                    clean_row['Endereço'] = row.get('Endereço no site', row.get('Endereço', 'N/A'))
+                    clean_row['Analytics'] = row.get('Google analytics ', row.get('Analytics', 'N/A'))
+                    
+                    # Views com limpeza numérica
+                    clean_row['Views Set'] = clean_numeric_value(row.get('Views Setembro', '0'))
+                    clean_row['Views Out'] = clean_numeric_value(row.get('Views Outubro', '0'))
+                    clean_row['Views Nov'] = clean_numeric_value(row.get('Views Novembro', '0'))
+                    clean_row['Média Trimestral'] = clean_numeric_value(row.get('Média Trimestral', '0'))
+                    clean_row['Views Ago'] = clean_numeric_value(row.get('Views Novembro', '0'))  # Usando Nov como Ago
+                    
+                    # Só adicionar se tiver nome válido
+                    if clean_row['Nome do veículo'] != 'N/A' and clean_row['Nome do veículo'].strip():
+                        data.append(clean_row)
+                
+                if len(data) > 0:
+                    print(f"Dados carregados do Google Sheets: {len(data)} registros")
+                    return data
+                else:
+                    print(f"Google Sheets retornou dados vazios: {url}")
+                    continue
+                    
+        except Exception as e:
+            print(f"Erro ao carregar dados do Google Sheets ({url}): {e}")
+            continue
     
-    # Métricas principais
-    total_sites = len(dff)
-    total_vis_junho = dff['visualizacoes_junho'].sum()
-    total_vis_julho = dff['visualizacoes_julho'].sum()
-    total_vis_agosto = dff['visualizacoes_agosto'].sum()
-    media_vis_site = dff['total_visualizacoes'].mean() if total_sites > 0 else 0
+    # Se todas as tentativas falharam, usar CSV local
+    print("Todas as tentativas do Google Sheets falharam, usando CSV local...")
+    return load_data_from_local_csv()
+
+# Cache dos dados
+cached_data = []
+last_update = None
+data_source = "local"
+
+@app.route('/')
+def index():
+    """Página principal do dashboard"""
+    return render_template('index.html')
+
+@app.route('/api/data')
+def get_data():
+    """API para obter todos os dados"""
+    global cached_data, last_update, data_source
     
-    metricas = html.Div([
-        html.Div([
-            html.H4(f'{total_sites:,}', style={'color': '#3498db', 'fontSize': 36, 'margin': 0}),
-            html.P('Total de Sites', style={'margin': 0})
-        ], className='three columns', style={'textAlign': 'center', 'backgroundColor': 'white', 'padding': 20, 'borderRadius': 5}),
+    # Recarregar dados se não existirem ou se passaram mais de 5 minutos
+    current_time = datetime.now()
+    if not cached_data or not last_update or (current_time - last_update).seconds > 300:
+        cached_data = load_data_from_sheets()
+        last_update = current_time
         
-        html.Div([
-            html.H4(f'{total_vis_junho:,.0f}', style={'color': '#e74c3c', 'fontSize': 36, 'margin': 0}),
-            html.P('Visualizações Junho', style={'margin': 0})
-        ], className='three columns', style={'textAlign': 'center', 'backgroundColor': 'white', 'padding': 20, 'borderRadius': 5}),
-        
-        html.Div([
-            html.H4(f'{total_vis_julho:,.0f}', style={'color': '#f39c12', 'fontSize': 36, 'margin': 0}),
-            html.P('Visualizações Julho', style={'margin': 0})
-        ], className='three columns', style={'textAlign': 'center', 'backgroundColor': 'white', 'padding': 20, 'borderRadius': 5}),
-        
-        html.Div([
-            html.H4(f'{total_vis_agosto:,.0f}', style={'color': '#27ae60', 'fontSize': 36, 'margin': 0}),
-            html.P('Visualizações Agosto', style={'margin': 0})
-        ], className='three columns', style={'textAlign': 'center', 'backgroundColor': 'white', 'padding': 20, 'borderRadius': 5})
-    ], className='row')
+        # Determinar fonte dos dados
+        if len(cached_data) > 0:
+            # Verificar se conseguiu carregar do Google Sheets (mais de 130 registros indica sucesso)
+            data_source = "sheets" if len(cached_data) > 130 else "local"
+        else:
+            data_source = "local"
     
-    # Gráfico de Visualizações por Mês
-    meses = ['Junho', 'Julho', 'Agosto']
-    visualizacoes = [total_vis_junho, total_vis_julho, total_vis_agosto]
-    fig_vis = px.bar(x=meses, y=visualizacoes, title='Total de Visualizações por Mês',
-                     color=visualizacoes, color_continuous_scale='viridis')
-    fig_vis.update_layout(showlegend=False, xaxis_title='Mês', yaxis_title='Visualizações')
+    return jsonify(cached_data)
+
+@app.route('/api/refresh')
+def refresh_data():
+    """API para forçar atualização dos dados"""
+    global cached_data, last_update, data_source
     
-    # Gráfico de Sites por Cidade
-    df_cidade = dff['cidade'].value_counts().head(10)
-    fig_cidade = px.pie(values=df_cidade.values, names=df_cidade.index, 
-                       title='Top 10 Cidades por Número de Sites')
+    print("Forçando atualização dos dados...")
+    cached_data = load_data_from_sheets()
+    last_update = datetime.now()
     
-    # Gráfico de Categoria vs Status
-    df_cat_status = dff.groupby(['categoria', 'status']).size().reset_index(name='count')
-    fig_cat_status = px.sunburst(df_cat_status, path=['categoria', 'status'], values='count',
-                                title='Distribuição por Categoria e Status')
+    # Determinar fonte dos dados
+    if len(cached_data) > 0:
+        data_source = "sheets" if len(cached_data) > 130 else "local"
+    else:
+        data_source = "local"
     
-    # Gráfico dos Top Sites por Visualizações
-    top_sites = dff.nlargest(10, 'total_visualizacoes')[['nome_fantasia', 'total_visualizacoes']]
-    fig_top = px.bar(top_sites, x='total_visualizacoes', y='nome_fantasia', 
-                     orientation='h', title='Top 10 Sites por Total de Visualizações')
-    fig_top.update_layout(yaxis={'categoryorder': 'total ascending'})
+    source_text = "Google Sheets" if data_source == "sheets" else "Arquivo local"
     
-    # Tabela de dados
-    colunas_tabela = ['nome_fantasia', 'cidade', 'categoria', 'status', 'url', 
-                     'visualizacoes_junho', 'visualizacoes_julho', 'visualizacoes_agosto', 'total_visualizacoes']
+    return jsonify({
+        'success': True,
+        'message': f'Dados atualizados com sucesso do {source_text}. {len(cached_data)} registros carregados.',
+        'timestamp': last_update.isoformat(),
+        'total_records': len(cached_data),
+        'source': source_text
+    })
+
+@app.route('/api/stats')
+def get_stats():
+    """API para obter estatísticas dos dados"""
+    global cached_data, data_source
     
-    tabela = dash_table.DataTable(
-        data=dff[colunas_tabela].head(20).to_dict('records'),
-        columns=[{'name': col.replace('_', ' ').title(), 'id': col} for col in colunas_tabela],
-        style_cell={'textAlign': 'left', 'padding': '10px'},
-        style_header={'backgroundColor': '#3498db', 'color': 'white', 'fontWeight': 'bold'},
-        style_data={'backgroundColor': '#ecf0f1'},
-        page_size=10,
-        sort_action='native',
-        filter_action='native'
-    )
+    if not cached_data:
+        cached_data = load_data_from_sheets()
     
-    return metricas, fig_vis, fig_cidade, fig_cat_status, fig_top, tabela
+    if not cached_data:
+        return jsonify({'error': 'Nenhum dado disponível'})
+    
+    # Calcular estatísticas manualmente
+    total_veiculos = len(cached_data)
+    
+    # Contar status
+    status_counts = {}
+    for item in cached_data:
+        status = item.get('Status', 'N/A')
+        status_counts[status] = status_counts.get(status, 0) + 1
+    
+    # Contar categorias
+    categoria_counts = {}
+    for item in cached_data:
+        categoria = item.get('Categoria', 'N/A')
+        categoria_counts[categoria] = categoria_counts.get(categoria, 0) + 1
+    
+    # Contar cidades
+    cidades_set = set()
+    for item in cached_data:
+        cidade = item.get('Cidade', 'N/A')
+        if cidade != 'N/A':
+            cidades_set.add(cidade)
+    
+    source_text = "Google Sheets" if data_source == "sheets" else f"Arquivo local ({len(cached_data)} registros)"
+    
+    stats = {
+        'total_veiculos': total_veiculos,
+        'total_cidades': len(cidades_set),
+        'status_counts': status_counts,
+        'categoria_counts': categoria_counts,
+        'data_source': source_text
+    }
+    
+    return jsonify(stats)
+
+@app.route('/api/search')
+def search_data():
+    """API para buscar dados"""
+    global cached_data
+    
+    if not cached_data:
+        cached_data = load_data_from_sheets()
+    
+    query = request.args.get('q', '').lower().strip()
+    
+    if not query:
+        return jsonify(cached_data)
+    
+    # Filtrar dados baseado na busca
+    filtered_data = []
+    for item in cached_data:
+        nome = str(item.get('Nome do veículo', '')).lower()
+        if query in nome:
+            filtered_data.append(item)
+    
+    return jsonify(filtered_data)
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=8080)
-
+    app.run(host='0.0.0.0', port=5000, debug=True)
