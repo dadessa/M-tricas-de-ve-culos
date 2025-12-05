@@ -7,7 +7,7 @@ from dash.dependencies import Input, Output
 import numpy as np
 
 # Carregar os dados
-df = pd.read_excel('/home/ubuntu/upload/Recadastramento(respostas)(2).xlsx')
+df = pd.read_json('dados_corrigidos.json', orient='records')
 
 # Renomear colunas para facilitar o uso
 df.columns = [
